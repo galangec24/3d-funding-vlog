@@ -1,0 +1,14 @@
+{
+  "projects": {
+    "default": "3d-funding-vlog"
+  },
+  "targets": {
+    "3d-funding-vlog": {
+      "hosting": {
+        "3d-funding-vlog": [
+          "3d-funding-vlog"
+        ]
+      }
+    }
+  }
+}

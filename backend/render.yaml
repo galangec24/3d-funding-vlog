@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: funding-vlog-backend
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+        required: true
+      - key: SUPABASE_ANON_KEY
+        sync: false
+        required: true
+      - key: NODE_VERSION
+        value: 18.17.0
+      - key: NODE_ENV
+        value: production
+    healthCheckPath: /api/health
+    autoDeploy: true
+    domains:
+      - funding-vlog-backend.onrender.com
+    region: oregon
+    numInstances: 1
