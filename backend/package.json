@@ -2,7 +2,7 @@
   "name": "funding-vlog-backend",
   "version": "1.0.0",
   "type": "module",
-  "description": "Backend API for 3D Funding Vlog Platform",
+  "description": "Sound and Silence",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
