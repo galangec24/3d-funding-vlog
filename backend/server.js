@@ -86,22 +86,56 @@ const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabase
 // ==================== TURNSTILE ====================
 
 app.get('/api/turnstile/site-key', (req, res) => {
-  res.json({ siteKey: CLOUDFLARE_SITE_KEY });
+  const siteKey = process.env.CLOUDFLARE_SITE_KEY || '';
+  console.log('Turnstile site key requested, configured:', siteKey ? 'Yes' : 'No');
+  res.json({ siteKey: siteKey });
 });
 
 app.post('/api/auth/verify-turnstile', async (req, res) => {
   const { token } = req.body;
   
+  console.log('Turnstile verification request received');
+  
   if (!token) {
+    console.log('No token provided');
     return res.status(400).json({ success: false, error: 'Turnstile token required' });
   }
   
-  const isValid = await verifyTurnstile(token);
+  const secretKey = process.env.CLOUDFLARE_SECRET_KEY;
   
-  if (isValid) {
-    res.json({ success: true });
-  } else {
-    res.status(400).json({ success: false, error: 'Verification failed' });
+  if (!secretKey) {
+    console.error('CLOUDFLARE_SECRET_KEY not set in environment');
+    return res.status(500).json({ success: false, error: 'Server configuration error' });
+  }
+  
+  try {
+    const formData = new URLSearchParams();
+    formData.append('secret', secretKey);
+    formData.append('response', token);
+    
+    const response = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: formData.toString()
+    });
+    
+    const data = await response.json();
+    console.log('Cloudflare verification response:', data.success ? 'Success' : 'Failed', data['error-codes']);
+    
+    if (data.success) {
+      res.json({ success: true });
+    } else {
+      res.status(400).json({ 
+        success: false, 
+        error: 'Verification failed',
+        details: data['error-codes'] 
+      });
+    }
+  } catch (error) {
+    console.error('Turnstile verification error:', error);
+    res.status(500).json({ success: false, error: 'Verification service error' });
   }
 });
 
