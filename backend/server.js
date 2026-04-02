@@ -86,56 +86,22 @@ const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabase
 // ==================== TURNSTILE ====================
 
 app.get('/api/turnstile/site-key', (req, res) => {
-  const siteKey = process.env.CLOUDFLARE_SITE_KEY || '';
-  console.log('Turnstile site key requested, configured:', siteKey ? 'Yes' : 'No');
-  res.json({ siteKey: siteKey });
+  res.json({ siteKey: CLOUDFLARE_SITE_KEY });
 });
 
 app.post('/api/auth/verify-turnstile', async (req, res) => {
   const { token } = req.body;
   
-  console.log('Turnstile verification request received');
-  
   if (!token) {
-    console.log('No token provided');
     return res.status(400).json({ success: false, error: 'Turnstile token required' });
   }
   
-  const secretKey = process.env.CLOUDFLARE_SECRET_KEY;
+  const isValid = await verifyTurnstile(token);
   
-  if (!secretKey) {
-    console.error('CLOUDFLARE_SECRET_KEY not set in environment');
-    return res.status(500).json({ success: false, error: 'Server configuration error' });
-  }
-  
-  try {
-    const formData = new URLSearchParams();
-    formData.append('secret', secretKey);
-    formData.append('response', token);
-    
-    const response = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: formData.toString()
-    });
-    
-    const data = await response.json();
-    console.log('Cloudflare verification response:', data.success ? 'Success' : 'Failed', data['error-codes']);
-    
-    if (data.success) {
-      res.json({ success: true });
-    } else {
-      res.status(400).json({ 
-        success: false, 
-        error: 'Verification failed',
-        details: data['error-codes'] 
-      });
-    }
-  } catch (error) {
-    console.error('Turnstile verification error:', error);
-    res.status(500).json({ success: false, error: 'Verification service error' });
+  if (isValid) {
+    res.json({ success: true });
+  } else {
+    res.status(400).json({ success: false, error: 'Verification failed' });
   }
 });
 
@@ -152,7 +118,7 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-//#region Authentication
+// ==================== USER AUTHENTICATION ====================
 
 // Get current user
 app.get('/api/auth/me', async (req, res) => {
@@ -168,6 +134,7 @@ app.get('/api/auth/me', async (req, res) => {
   }
 });
 
+// Get user profile by ID
 app.get('/api/users/:id', async (req, res) => {
   const { id } = req.params;
   if (!supabase) return res.json({ success: false, user: null });
@@ -183,9 +150,8 @@ app.get('/api/users/:id', async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 });
-//#endregion
 
-//#region User Management
+// Update user profile
 app.put('/api/users/:id', async (req, res) => {
   const { id } = req.params;
   const { name, nickname, birth_date, hobbies, music_genres, location, bio } = req.body;
@@ -214,7 +180,6 @@ app.put('/api/users/:id', async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 });
-//#endregion
 
 // ==================== USER STATISTICS ====================
 
@@ -226,10 +191,7 @@ app.get('/api/users/stats/age', async (req, res) => {
       stats: {
         totalUsers: 0,
         ageGroups: { child: 0, teenager: 0, youngAdult: 0, adult: 0, senior: 0 },
-        ages: [],
-        averageAge: 0,
-        minAge: null,
-        maxAge: null
+        ages: []
       }
     });
   }
@@ -263,7 +225,7 @@ app.get('/api/users/stats/age', async (req, res) => {
           age--;
         }
         
-        if (age >= 0 && age < 120) { // Sanity check
+        if (age >= 0) {
           ages.push(age);
           if (age <= 12) ageGroups.child++;
           else if (age <= 19) ageGroups.teenager++;
@@ -274,38 +236,24 @@ app.get('/api/users/stats/age', async (req, res) => {
       }
     });
     
-    const averageAge = ages.length > 0 ? Math.round(ages.reduce((a, b) => a + b, 0) / ages.length) : 0;
-    const minAge = ages.length > 0 ? Math.min(...ages) : null;
-    const maxAge = ages.length > 0 ? Math.max(...ages) : null;
-    
     res.json({ 
       success: true, 
       stats: {
         totalUsers,
         ageGroups,
         ages: ages.sort((a, b) => a - b),
-        averageAge,
-        minAge,
-        maxAge
+        averageAge: ages.length > 0 ? Math.round(ages.reduce((a, b) => a + b, 0) / ages.length) : 0,
+        minAge: ages.length > 0 ? Math.min(...ages) : null,
+        maxAge: ages.length > 0 ? Math.max(...ages) : null
       }
     });
   } catch (error) {
     console.error('Error fetching age stats:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: error.message,
-      stats: {
-        totalUsers: 0,
-        ageGroups: { child: 0, teenager: 0, youngAdult: 0, adult: 0, senior: 0 },
-        averageAge: 0,
-        minAge: null,
-        maxAge: null
-      }
-    });
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-//#region User Count
+// Get total registered users count
 app.get('/api/users/count', async (req, res) => {
   if (!supabase) {
     return res.json({ success: true, count: 0 });
@@ -420,76 +368,6 @@ app.get('/api/online/count', async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 });
-//#endregion
-
-//#region Contact Us
-app.post('/api/contact', async (req, res) => {
-  const { firstName, lastName, email, message, turnstile_token, supportType } = req.body;
-  
-  if (!turnstile_token) {
-    return res.status(400).json({ success: false, error: 'Verification required' });
-  }
-  
-  const isHuman = await verifyTurnstile(turnstile_token);
-  if (!isHuman) {
-    return res.status(400).json({ success: false, error: 'Verification failed' });
-  }
-  
-  if (!firstName || !lastName || !email || !message) {
-    return res.status(400).json({ success: false, error: 'All fields required' });
-  }
-  
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  if (!emailRegex.test(email)) {
-    return res.status(400).json({ success: false, error: 'Invalid email format' });
-  }
-  
-  if (!supabase) {
-    console.log('Contact form submission:', { firstName, lastName, email, message, supportType });
-    return res.json({ success: true, message: 'Message sent successfully!' });
-  }
-  
-  try {
-    const { error } = await supabase
-      .from('contact_messages')
-      .insert([{
-        first_name: firstName.trim(),
-        last_name: lastName.trim(),
-        email: email.trim().toLowerCase(),
-        message: message.trim(),
-        support_type: supportType || null,
-        status: 'unread',
-        created_at: new Date().toISOString()
-      }]);
-    
-    if (error) throw error;
-    
-    res.json({ success: true, message: 'Message sent successfully!' });
-  } catch (error) {
-    console.error('Error saving contact message:', error);
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Get contact messages (admin only)
-app.get('/api/contact/messages', async (req, res) => {
-  if (!supabase) {
-    return res.json({ success: true, messages: [] });
-  }
-  
-  try {
-    const { data, error } = await supabase
-      .from('contact_messages')
-      .select('*')
-      .order('created_at', { ascending: false });
-    
-    if (error) throw error;
-    res.json({ success: true, messages: data || [] });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-//#endregion
 
 // ==================== SUPPORT TICKETS ====================
 
@@ -761,6 +639,117 @@ app.post('/api/events/:id/register', async (req, res) => {
     if (error) throw error;
     res.json({ success: true, registration: data[0] });
   } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ==================== CONTACT FORM ====================
+
+app.post('/api/contact', async (req, res) => {
+  const { firstName, lastName, email, message, turnstile_token, supportType } = req.body;
+  
+  if (!turnstile_token) {
+    return res.status(400).json({ success: false, error: 'Verification required' });
+  }
+  
+  const isHuman = await verifyTurnstile(turnstile_token);
+  if (!isHuman) {
+    return res.status(400).json({ success: false, error: 'Verification failed' });
+  }
+  
+  if (!firstName || !lastName || !email || !message) {
+    return res.status(400).json({ success: false, error: 'All fields required' });
+  }
+  
+  if (!supabase) {
+    console.log('Contact form submission:', { firstName, lastName, email, message, supportType });
+    return res.json({ success: true, message: 'Message sent successfully!' });
+  }
+  
+  try {
+    const { error } = await supabase
+      .from('contact_messages')
+      .insert([{
+        first_name: firstName.trim(),
+        last_name: lastName.trim(),
+        email: email.trim().toLowerCase(),
+        message: message.trim(),
+        support_type: supportType || null,
+        status: 'unread',
+        created_at: new Date().toISOString()
+      }]);
+    
+    if (error) throw error;
+    res.json({ success: true, message: 'Message sent successfully!' });
+  } catch (error) {
+    console.error('Error saving contact message:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/contact/messages', async (req, res) => {
+  if (!supabase) {
+    return res.json({ success: true, messages: [] });
+  }
+  
+  try {
+    const { data, error } = await supabase
+      .from('contact_messages')
+      .select('*')
+      .order('created_at', { ascending: false });
+    
+    if (error) throw error;
+    res.json({ success: true, messages: data || [] });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ==================== SUPPORT US ====================
+
+app.post('/api/support-us', async (req, res) => {
+  const { firstName, lastName, email, phone, message, interests, availability, organization, donationAmount, supportType, turnstile_token } = req.body;
+  
+  if (!turnstile_token) {
+    return res.status(400).json({ success: false, error: 'Verification required' });
+  }
+  
+  const isHuman = await verifyTurnstile(turnstile_token);
+  if (!isHuman) {
+    return res.status(400).json({ success: false, error: 'Verification failed' });
+  }
+  
+  if (!firstName || !lastName || !email) {
+    return res.status(400).json({ success: false, error: 'Name and email required' });
+  }
+  
+  if (!supabase) {
+    console.log('Support inquiry:', { firstName, lastName, email, supportType });
+    return res.json({ success: true });
+  }
+  
+  try {
+    const { error } = await supabase
+      .from('support_inquiries')
+      .insert([{
+        first_name: firstName.trim(),
+        last_name: lastName.trim(),
+        email: email.trim().toLowerCase(),
+        phone: phone || null,
+        message: message || null,
+        interests: interests || [],
+        availability: availability || null,
+        organization: organization || null,
+        donation_amount: donationAmount || null,
+        support_type: supportType,
+        status: 'pending',
+        created_at: new Date().toISOString()
+      }]);
+    
+    if (error) throw error;
+    res.json({ success: true, message: 'Thank you for your support!' });
+  } catch (error) {
+    console.error('Error saving support inquiry:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
