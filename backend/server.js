@@ -3,7 +3,6 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import { createClient } from '@supabase/supabase-js';
 import rateLimit from 'express-rate-limit';
-import nodemailer from 'nodemailer';
 
 dotenv.config();
 
@@ -17,68 +16,57 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// ==================== EMAIL CONFIGURATION ====================
-const emailTransporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS
-  }
-});
-
-// Generate random OTP code
-function generateOTP() {
-  return Math.floor(100000 + Math.random() * 900000).toString();
-}
-
-// Send verification email
-async function sendVerificationEmail(email, code) {
-  const mailOptions = {
-    from: process.env.EMAIL_USER,
-    to: email,
-    subject: 'Sound & Silence - Email Verification',
-    html: `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-        <h2 style="color: #8b5cf6;">Welcome to Sound & Silence!</h2>
-        <p>Thank you for registering. Please use the following code to verify your email address:</p>
-        <div style="background: #f3f4f6; padding: 20px; text-align: center; font-size: 32px; font-weight: bold; letter-spacing: 5px; border-radius: 10px; color: #8b5cf6;">
-          ${code}
-        </div>
-        <p>This code will expire in 10 minutes.</p>
-        <p>If you didn't request this, please ignore this email.</p>
-        <hr>
-        <p style="color: #6b7280; font-size: 12px;">Sound & Silence - Science-based sober events in East London</p>
-      </div>
-    `
-  };
-  await emailTransporter.sendMail(mailOptions);
-}
-
 // Cloudflare Turnstile Configuration
 const CLOUDFLARE_SECRET_KEY = process.env.CLOUDFLARE_SECRET_KEY || '';
 const CLOUDFLARE_SITE_KEY = process.env.CLOUDFLARE_SITE_KEY || '';
 
+// Turnstile verification function
 async function verifyTurnstile(token) {
   if (!token) return false;
-  if (!CLOUDFLARE_SECRET_KEY) return true;
-  return true; // Simplified for demo
+  if (!CLOUDFLARE_SECRET_KEY) {
+    console.warn('⚠️ Cloudflare Turnstile not configured. Skipping verification.');
+    return true;
+  }
+  
+  try {
+    const response = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({
+        secret: CLOUDFLARE_SECRET_KEY,
+        response: token,
+      }).toString(),
+    });
+    
+    const data = await response.json();
+    return data.success === true;
+  } catch (error) {
+    console.error('Turnstile verification error:', error);
+    return false;
+  }
 }
 
 // Rate limiting
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
-  message: 'Too many requests',
+  message: 'Too many requests from this IP, please try again later.',
+  standardHeaders: true,
+  legacyHeaders: false,
 });
 app.use('/api/', limiter);
 
+// Stricter rate limit for login/submissions
 const strictLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 5,
-  message: 'Too many attempts',
+  skipSuccessfulRequests: true,
+  message: 'Too many attempts. Please try again later.',
 });
 
-// Request logging
+// Request logging middleware
 app.use((req, res, next) => {
   console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
   next();
@@ -87,159 +75,50 @@ app.use((req, res, next) => {
 // Supabase client
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_ANON_KEY;
+
+if (!supabaseUrl || !supabaseKey) {
+  console.error('❌ Missing Supabase credentials!');
+  console.warn('⚠️ Running without Supabase - some features will not work');
+}
+
 const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
 
 // ==================== TURNSTILE ====================
+
 app.get('/api/turnstile/site-key', (req, res) => {
   res.json({ siteKey: CLOUDFLARE_SITE_KEY });
 });
 
+app.post('/api/auth/verify-turnstile', async (req, res) => {
+  const { token } = req.body;
+  
+  if (!token) {
+    return res.status(400).json({ success: false, error: 'Turnstile token required' });
+  }
+  
+  const isValid = await verifyTurnstile(token);
+  
+  if (isValid) {
+    res.json({ success: true });
+  } else {
+    res.status(400).json({ success: false, error: 'Verification failed' });
+  }
+});
+
 // ==================== HEALTH CHECK ====================
+
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString(), uptime: process.uptime() });
+  res.json({ 
+    status: 'ok', 
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    environment: process.env.NODE_ENV || 'development',
+    supabase: supabase ? 'connected' : 'not configured',
+    turnstile: CLOUDFLARE_SITE_KEY ? 'configured' : 'not configured'
+  });
 });
 
 // ==================== USER AUTHENTICATION ====================
-
-// Register user with OTP
-app.post('/api/auth/register', async (req, res) => {
-  const { email, name } = req.body;
-  
-  if (!email || !name) {
-    return res.status(400).json({ success: false, error: 'Name and email required' });
-  }
-  
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  if (!emailRegex.test(email)) {
-    return res.status(400).json({ success: false, error: 'Invalid email format' });
-  }
-  
-  if (!supabase) {
-    return res.json({ success: true, message: 'Verification code sent (demo mode)' });
-  }
-  
-  try {
-    const { data: existing } = await supabase
-      .from('app_users')
-      .select('id, is_verified')
-      .eq('email', email.toLowerCase())
-      .single();
-    
-    if (existing && existing.is_verified) {
-      return res.status(400).json({ success: false, error: 'Email already registered' });
-    }
-    
-    const code = generateOTP();
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-    
-    await supabase.from('email_verifications').insert([{
-      email: email.toLowerCase(),
-      code,
-      expires_at: expiresAt.toISOString()
-    }]);
-    
-    await sendVerificationEmail(email, code);
-    
-    if (existing && !existing.is_verified) {
-      await supabase.from('app_users').update({ name }).eq('email', email.toLowerCase());
-    } else {
-      await supabase.from('app_users').insert([{
-        email: email.toLowerCase(),
-        name,
-        user_type: 'user',
-        is_verified: false
-      }]);
-    }
-    
-    res.json({ success: true, message: 'Verification code sent to your email' });
-  } catch (error) {
-    console.error('Registration error:', error);
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Verify OTP
-app.post('/api/auth/verify', async (req, res) => {
-  const { email, code } = req.body;
-  
-  if (!email || !code) {
-    return res.status(400).json({ success: false, error: 'Email and code required' });
-  }
-  
-  if (!supabase) {
-    return res.json({ success: true, user: { id: 1, email, name: 'Test User', user_type: 'user' } });
-  }
-  
-  try {
-    const { data: verification } = await supabase
-      .from('email_verifications')
-      .select('*')
-      .eq('email', email.toLowerCase())
-      .eq('code', code)
-      .eq('used', false)
-      .single();
-    
-    if (!verification) {
-      return res.status(400).json({ success: false, error: 'Invalid or expired code' });
-    }
-    
-    if (new Date(verification.expires_at) < new Date()) {
-      return res.status(400).json({ success: false, error: 'Code has expired' });
-    }
-    
-    await supabase.from('email_verifications').update({ used: true }).eq('id', verification.id);
-    
-    const { data: user } = await supabase
-      .from('app_users')
-      .update({ is_verified: true, updated_at: new Date().toISOString() })
-      .eq('email', email.toLowerCase())
-      .select()
-      .single();
-    
-    const sessionToken = Buffer.from(`${user.id}:${Date.now()}`).toString('base64');
-    
-    res.json({ success: true, user: { id: user.id, email: user.email, name: user.name, user_type: user.user_type }, session_token: sessionToken });
-  } catch (error) {
-    console.error('Verification error:', error);
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Google Login (simplified - Firebase handles actual Google auth)
-app.post('/api/auth/google', async (req, res) => {
-  const { email, name, google_id } = req.body;
-  
-  if (!email) {
-    return res.status(400).json({ success: false, error: 'Email required' });
-  }
-  
-  if (!supabase) {
-    return res.json({ success: true, user: { id: 1, email, name: name || email.split('@')[0], user_type: 'user' } });
-  }
-  
-  try {
-    let { data: user } = await supabase.from('app_users').select('*').eq('email', email.toLowerCase()).single();
-    
-    if (!user) {
-      const { data: newUser } = await supabase.from('app_users').insert([{
-        email: email.toLowerCase(),
-        name: name || email.split('@')[0],
-        user_type: 'user',
-        is_verified: true,
-        last_login: new Date().toISOString()
-      }]).select().single();
-      user = newUser;
-    } else {
-      await supabase.from('app_users').update({ last_login: new Date().toISOString() }).eq('id', user.id);
-    }
-    
-    const sessionToken = Buffer.from(`${user.id}:${Date.now()}`).toString('base64');
-    res.json({ success: true, user: { id: user.id, email: user.email, name: user.name, user_type: user.user_type }, session_token: sessionToken });
-  } catch (error) {
-    console.error('Google login error:', error);
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
 
 // Get current user
 app.get('/api/auth/me', async (req, res) => {
@@ -248,10 +127,149 @@ app.get('/api/auth/me', async (req, res) => {
   
   try {
     const userId = parseInt(Buffer.from(token, 'base64').toString().split(':')[0]);
-    const { data: user } = await supabase.from('app_users').select('id, email, name, user_type').eq('id', userId).single();
+    const { data: user } = await supabase.from('app_users').select('id, email, name, user_type, nickname, hobbies, music_genres, location, bio, birth_date').eq('id', userId).single();
     res.json({ success: true, user: user || null });
   } catch (error) {
     res.json({ success: false, user: null });
+  }
+});
+
+// Get user profile by ID
+app.get('/api/users/:id', async (req, res) => {
+  const { id } = req.params;
+  if (!supabase) return res.json({ success: false, user: null });
+  
+  try {
+    const { data: user } = await supabase
+      .from('app_users')
+      .select('id, name, nickname, location, bio, hobbies, music_genres, birth_date')
+      .eq('id', id)
+      .single();
+    res.json({ success: true, user });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Update user profile
+app.put('/api/users/:id', async (req, res) => {
+  const { id } = req.params;
+  const { name, nickname, birth_date, hobbies, music_genres, location, bio } = req.body;
+  
+  if (!supabase) return res.json({ success: true });
+  
+  try {
+    const { error } = await supabase
+      .from('app_users')
+      .update({ 
+        name, 
+        nickname, 
+        birth_date, 
+        hobbies, 
+        music_genres, 
+        location, 
+        bio,
+        birthdate_set: !!birth_date,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', id);
+    
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ==================== USER STATISTICS ====================
+
+// Get user age statistics
+app.get('/api/users/stats/age', async (req, res) => {
+  if (!supabase) {
+    return res.json({ 
+      success: true, 
+      stats: {
+        totalUsers: 0,
+        ageGroups: { child: 0, teenager: 0, youngAdult: 0, adult: 0, senior: 0 },
+        ages: []
+      }
+    });
+  }
+  
+  try {
+    const { data: users, error } = await supabase
+      .from('app_users')
+      .select('birth_date');
+    
+    if (error) throw error;
+    
+    const totalUsers = users?.length || 0;
+    
+    let ageGroups = {
+      child: 0,      // 0-12
+      teenager: 0,   // 13-19
+      youngAdult: 0, // 20-35
+      adult: 0,      // 36-59
+      senior: 0      // 60+
+    };
+    
+    const ages = [];
+    
+    users?.forEach(user => {
+      if (user.birth_date) {
+        const birthDate = new Date(user.birth_date);
+        const today = new Date();
+        let age = today.getFullYear() - birthDate.getFullYear();
+        const monthDiff = today.getMonth() - birthDate.getMonth();
+        if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
+          age--;
+        }
+        
+        if (age >= 0) {
+          ages.push(age);
+          if (age <= 12) ageGroups.child++;
+          else if (age <= 19) ageGroups.teenager++;
+          else if (age <= 35) ageGroups.youngAdult++;
+          else if (age <= 59) ageGroups.adult++;
+          else ageGroups.senior++;
+        }
+      }
+    });
+    
+    res.json({ 
+      success: true, 
+      stats: {
+        totalUsers,
+        ageGroups,
+        ages: ages.sort((a, b) => a - b),
+        averageAge: ages.length > 0 ? Math.round(ages.reduce((a, b) => a + b, 0) / ages.length) : 0,
+        minAge: ages.length > 0 ? Math.min(...ages) : null,
+        maxAge: ages.length > 0 ? Math.max(...ages) : null
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching age stats:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get total registered users count
+app.get('/api/users/count', async (req, res) => {
+  if (!supabase) {
+    return res.json({ success: true, count: 0 });
+  }
+  
+  try {
+    const { count, error } = await supabase
+      .from('app_users')
+      .select('*', { count: 'exact', head: true });
+    
+    if (error) throw error;
+    
+    res.json({ success: true, count: count || 0 });
+  } catch (error) {
+    console.error('Error fetching user count:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
@@ -291,16 +309,35 @@ app.post('/api/online/track', async (req, res) => {
     const { data: existing } = await supabase.from('online_users').select('id').eq('session_id', session_id).maybeSingle();
     
     if (existing) {
-      await supabase.from('online_users').update({ last_seen: now, current_page: current_page || null, user_name: user_name || 'Guest', user_id: authenticatedUserId, is_authenticated: isAuthenticated }).eq('session_id', session_id);
+      await supabase.from('online_users').update({ 
+        last_seen: now, 
+        current_page: current_page || null, 
+        user_name: user_name || 'Guest', 
+        user_id: authenticatedUserId, 
+        is_authenticated: isAuthenticated 
+      }).eq('session_id', session_id);
     } else {
-      await supabase.from('online_users').insert([{ session_id, user_name: user_name || 'Guest', user_id: authenticatedUserId, is_authenticated: isAuthenticated, current_page: current_page || null, user_agent: user_agent || null, last_seen: now }]);
+      await supabase.from('online_users').insert([{ 
+        session_id, 
+        user_name: user_name || 'Guest', 
+        user_id: authenticatedUserId, 
+        is_authenticated: isAuthenticated, 
+        current_page: current_page || null, 
+        user_agent: user_agent || null, 
+        last_seen: now 
+      }]);
     }
     
     const { count: totalCount } = await supabase.from('online_users').select('*', { count: 'exact', head: true }).gte('last_seen', fiveMinutesAgo);
     const { data: authenticatedUsers } = await supabase.from('online_users').select('user_name, user_id, current_page, last_seen').eq('is_authenticated', true).gte('last_seen', fiveMinutesAgo).order('last_seen', { ascending: false });
     const { data: guestUsers } = await supabase.from('online_users').select('user_name, current_page, last_seen').eq('is_authenticated', false).gte('last_seen', fiveMinutesAgo).order('last_seen', { ascending: false }).limit(10);
     
-    res.json({ success: true, onlineCount: totalCount || 0, authenticatedCount: authenticatedUsers?.length || 0, users: [...(authenticatedUsers || []), ...(guestUsers || [])] });
+    res.json({ 
+      success: true, 
+      onlineCount: totalCount || 0, 
+      authenticatedCount: authenticatedUsers?.length || 0, 
+      users: [...(authenticatedUsers || []), ...(guestUsers || [])] 
+    });
   } catch (error) {
     console.error('Error tracking user:', error);
     res.status(500).json({ success: false, error: error.message });
@@ -333,6 +370,7 @@ app.get('/api/online/count', async (req, res) => {
 });
 
 // ==================== SUPPORT TICKETS ====================
+
 app.get('/api/support-tickets', async (req, res) => {
   if (!supabase) return res.json({ success: true, tickets: [] });
   try {
@@ -375,6 +413,7 @@ app.put('/api/support-tickets/:id', async (req, res) => {
 });
 
 // ==================== VLOGS ====================
+
 app.get('/api/vlogs', async (req, res) => {
   if (!supabase) return res.json({ success: true, vlogs: [] });
   try {
@@ -430,6 +469,7 @@ app.delete('/api/vlogs/:id', async (req, res) => {
 });
 
 // ==================== BLOG POSTS ====================
+
 app.get('/api/blog/posts', async (req, res) => {
   if (!supabase) return res.json({ success: true, posts: [] });
   try {
@@ -511,6 +551,7 @@ app.delete('/api/blog/posts/:id', async (req, res) => {
 });
 
 // ==================== EVENTS ====================
+
 app.get('/api/events', async (req, res) => {
   if (!supabase) return res.json({ success: true, events: [] });
   try {
@@ -603,6 +644,7 @@ app.post('/api/events/:id/register', async (req, res) => {
 });
 
 // ==================== STATISTICS ====================
+
 app.get('/api/stats', async (req, res) => {
   let totalTickets = 0, totalVlogs = 0, totalBlogs = 0;
   if (supabase) {
@@ -621,6 +663,7 @@ app.get('/api/stats', async (req, res) => {
 });
 
 // ==================== ROOT ====================
+
 app.get('/', (req, res) => {
   res.json({ name: 'Sound & Silence API', version: '2.0.0', status: 'running' });
 });
@@ -645,5 +688,6 @@ app.listen(PORT, () => {
   console.log(`🎫 Tickets: http://localhost:${PORT}/api/support-tickets`);
   console.log(`📅 Events: http://localhost:${PORT}/api/events`);
   console.log(`👥 Online: http://localhost:${PORT}/api/online/count`);
-  console.log(`🔐 Auth: http://localhost:${PORT}/api/auth/me`);
+  console.log(`👤 Users: http://localhost:${PORT}/api/users/count`);
+  console.log(`🔐 Turnstile: ${CLOUDFLARE_SITE_KEY ? 'Configured' : 'Not configured'}\n`);
 });
