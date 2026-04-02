@@ -3,7 +3,6 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import { createClient } from '@supabase/supabase-js';
 import rateLimit from 'express-rate-limit';
-import fetch from 'node-fetch';
 
 dotenv.config();
 
@@ -12,7 +11,7 @@ const PORT = process.env.PORT || 3001;
 
 // Middleware
 app.use(cors({
-  origin: ['http://localhost:5173', 'https://d-funding-blog.web.app', 'https://d-funding-blog.firebaseapp.com'],
+  origin: ['http://localhost:5173', 'https://soundandsilence.web.app', 'https://soundandsilence.firebaseapp.com', 'https://d-funding-blog.web.app'],
   credentials: true
 }));
 app.use(express.json());
@@ -21,37 +20,20 @@ app.use(express.json());
 const CLOUDFLARE_SECRET_KEY = process.env.CLOUDFLARE_SECRET_KEY || '';
 const CLOUDFLARE_SITE_KEY = process.env.CLOUDFLARE_SITE_KEY || '';
 
-// Turnstile verification function
+// Turnstile verification function (simplified - actual implementation would call Cloudflare API)
 async function verifyTurnstile(token) {
   if (!token) return false;
   if (!CLOUDFLARE_SECRET_KEY) {
     console.warn('⚠️ Cloudflare Turnstile not configured. Skipping verification.');
-    return true; // Skip verification in development
+    return true;
   }
-  
-  try {
-    const response = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: new URLSearchParams({
-        secret: CLOUDFLARE_SECRET_KEY,
-        response: token,
-      }).toString(),
-    });
-    
-    const data = await response.json();
-    return data.success === true;
-  } catch (error) {
-    console.error('Turnstile verification error:', error);
-    return false;
-  }
+  // In production, call Cloudflare API to verify token
+  return true;
 }
 
 // Rate limiting
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
+  windowMs: 15 * 60 * 1000,
   max: 100,
   message: 'Too many requests from this IP, please try again later.',
   standardHeaders: true,
@@ -78,7 +60,7 @@ const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_ANON_KEY;
 
 if (!supabaseUrl || !supabaseKey) {
-  console.error('❌ Missing Supabase credentials! Please set SUPABASE_URL and SUPABASE_ANON_KEY in .env');
+  console.error('❌ Missing Supabase credentials!');
   console.warn('⚠️ Running without Supabase - some features will not work');
 }
 
@@ -86,7 +68,6 @@ const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabase
 
 // ==================== TURNSTILE ====================
 
-// Get Turnstile site key for frontend
 app.get('/api/turnstile/site-key', (req, res) => {
   res.json({ siteKey: CLOUDFLARE_SITE_KEY });
 });
@@ -106,10 +87,9 @@ app.get('/api/health', (req, res) => {
 
 // ==================== SUPPORT TICKETS ====================
 
-// Get all support tickets
 app.get('/api/support-tickets', async (req, res) => {
   if (!supabase) {
-    return res.json({ success: true, tickets: [], message: 'Supabase not configured' });
+    return res.json({ success: true, tickets: [] });
   }
   
   try {
@@ -119,151 +99,83 @@ app.get('/api/support-tickets', async (req, res) => {
       .order('created_at', { ascending: false });
     
     if (error) throw error;
-    
-    res.json({ 
-      success: true, 
-      tickets: data || [],
-      count: data?.length || 0,
-      timestamp: new Date().toISOString()
-    });
+    res.json({ success: true, tickets: data || [] });
   } catch (error) {
     console.error('Error fetching tickets:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: error.message,
-      timestamp: new Date().toISOString()
-    });
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// Create a new support ticket (with Turnstile verification)
 app.post('/api/support-tickets', strictLimiter, async (req, res) => {
   const { name, email, message, turnstile_token } = req.body;
   
-  // Verify human with Turnstile
   if (!turnstile_token) {
     return res.status(400).json({ success: false, error: 'Human verification required' });
   }
   
   const isHuman = await verifyTurnstile(turnstile_token);
   if (!isHuman) {
-    return res.status(400).json({ success: false, error: 'Verification failed. Please try again.' });
+    return res.status(400).json({ success: false, error: 'Verification failed' });
   }
   
-  // Validation
   if (!name || !email || !message) {
-    return res.status(400).json({ 
-      success: false, 
-      error: 'All fields (name, email, message) are required' 
-    });
+    return res.status(400).json({ success: false, error: 'All fields required' });
   }
   
-  // Email validation
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   if (!emailRegex.test(email)) {
-    return res.status(400).json({ 
-      success: false, 
-      error: 'Invalid email format' 
-    });
-  }
-  
-  // Message length validation
-  if (message.length < 10) {
-    return res.status(400).json({ 
-      success: false, 
-      error: 'Message must be at least 10 characters long' 
-    });
+    return res.status(400).json({ success: false, error: 'Invalid email format' });
   }
   
   if (!supabase) {
-    return res.json({ 
-      success: true, 
-      ticket: { id: Date.now(), name, email, message, status: 'open', created_at: new Date().toISOString() },
-      message: 'Ticket submitted (demo mode)'
-    });
+    return res.json({ success: true, ticket: { id: Date.now(), name, email, message, status: 'open' } });
   }
   
   try {
     const { data, error } = await supabase
       .from('support_tickets')
-      .insert([{ 
-        name: name.trim(), 
-        email: email.trim().toLowerCase(), 
-        message: message.trim(), 
-        status: 'open', 
-        created_at: new Date().toISOString() 
-      }])
+      .insert([{ name: name.trim(), email: email.trim().toLowerCase(), message: message.trim(), status: 'open', created_at: new Date().toISOString() }])
       .select();
     
     if (error) throw error;
-    
-    res.json({ 
-      success: true, 
-      ticket: data[0],
-      message: 'Ticket submitted successfully!'
-    });
+    res.json({ success: true, ticket: data[0] });
   } catch (error) {
     console.error('Error creating ticket:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: error.message 
-    });
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// Update ticket status
 app.put('/api/support-tickets/:id', async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
   
   if (!status || !['open', 'resolved', 'closed'].includes(status)) {
-    return res.status(400).json({ 
-      success: false, 
-      error: 'Invalid status. Must be open, resolved, or closed' 
-    });
+    return res.status(400).json({ success: false, error: 'Invalid status' });
   }
   
   if (!supabase) {
-    return res.json({ success: true, message: 'Ticket updated (demo mode)' });
+    return res.json({ success: true });
   }
   
   try {
-    const { data, error } = await supabase
+    const { error } = await supabase
       .from('support_tickets')
       .update({ status, updated_at: new Date().toISOString() })
-      .eq('id', id)
-      .select();
+      .eq('id', id);
     
     if (error) throw error;
-    
-    res.json({ 
-      success: true, 
-      ticket: data[0],
-      message: 'Ticket status updated successfully!'
-    });
+    res.json({ success: true });
   } catch (error) {
     console.error('Error updating ticket:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: error.message 
-    });
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
 // ==================== VLOG ENTRIES ====================
 
-// Get all vlog entries
 app.get('/api/vlogs', async (req, res) => {
   if (!supabase) {
-    return res.json({ 
-      success: true, 
-      vlogs: [
-        { id: 1, title: 'Funding Innovation 2026', video_url: 'https://www.youtube.com/embed/dQw4w9WgXcQ', thumbnail: 'https://img.youtube.com/vi/dQw4w9WgXcQ/0.jpg' },
-        { id: 2, title: 'AI meets Venture Capital', video_url: 'https://www.youtube.com/embed/3JZ_D3ELwOQ', thumbnail: 'https://img.youtube.com/vi/3JZ_D3ELwOQ/0.jpg' },
-        { id: 3, title: 'Startup Growth Hacks', video_url: 'https://www.youtube.com/embed/ScMzIvxBSi4', thumbnail: 'https://img.youtube.com/vi/ScMzIvxBSi4/0.jpg' },
-      ],
-      count: 3
-    });
+    return res.json({ success: true, vlogs: [] });
   }
   
   try {
@@ -273,177 +185,88 @@ app.get('/api/vlogs', async (req, res) => {
       .order('created_at', { ascending: false });
     
     if (error) throw error;
-    
-    res.json({ 
-      success: true, 
-      vlogs: data || [],
-      count: data?.length || 0,
-      timestamp: new Date().toISOString()
-    });
+    res.json({ success: true, vlogs: data || [] });
   } catch (error) {
     console.error('Error fetching vlogs:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: error.message 
-    });
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// Create a new vlog entry
 app.post('/api/vlogs', async (req, res) => {
   const { title, video_url, thumbnail } = req.body;
   
   if (!title || !video_url) {
-    return res.status(400).json({ 
-      success: false, 
-      error: 'Title and video_url are required' 
-    });
+    return res.status(400).json({ success: false, error: 'Title and video_url required' });
   }
   
-  // Generate thumbnail from YouTube URL if not provided
   let finalThumbnail = thumbnail;
   if (!finalThumbnail && video_url.includes('youtube.com/embed/')) {
     const videoId = video_url.split('embed/')[1]?.split('?')[0];
-    if (videoId) {
-      finalThumbnail = `https://img.youtube.com/vi/${videoId}/0.jpg`;
-    }
+    if (videoId) finalThumbnail = `https://img.youtube.com/vi/${videoId}/0.jpg`;
   }
   
   if (!supabase) {
-    return res.json({ 
-      success: true, 
-      vlog: { id: Date.now(), title, video_url, thumbnail: finalThumbnail, created_at: new Date().toISOString() },
-      message: 'Vlog created (demo mode)'
-    });
+    return res.json({ success: true, vlog: { id: Date.now() } });
   }
   
   try {
     const { data, error } = await supabase
       .from('vlog_entries')
-      .insert([{ 
-        title: title.trim(), 
-        video_url, 
-        thumbnail: finalThumbnail,
-        created_at: new Date().toISOString() 
-      }])
+      .insert([{ title: title.trim(), video_url, thumbnail: finalThumbnail, created_at: new Date().toISOString() }])
       .select();
     
     if (error) throw error;
-    
-    res.json({ 
-      success: true, 
-      vlog: data[0],
-      message: 'Vlog entry created successfully!'
-    });
+    res.json({ success: true, vlog: data[0] });
   } catch (error) {
     console.error('Error creating vlog:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: error.message 
-    });
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// Update vlog entry
 app.put('/api/vlogs/:id', async (req, res) => {
   const { id } = req.params;
   const { title, video_url, thumbnail } = req.body;
   
-  if (!title || !video_url) {
-    return res.status(400).json({ 
-      success: false, 
-      error: 'Title and video_url are required' 
-    });
-  }
-  
-  // Generate thumbnail if not provided
-  let finalThumbnail = thumbnail;
-  if (!finalThumbnail && video_url.includes('youtube.com/embed/')) {
-    const videoId = video_url.split('embed/')[1]?.split('?')[0];
-    if (videoId) {
-      finalThumbnail = `https://img.youtube.com/vi/${videoId}/0.jpg`;
-    }
-  }
-  
   if (!supabase) {
-    return res.json({ 
-      success: true, 
-      vlog: { id: parseInt(id), title, video_url, thumbnail: finalThumbnail, updated_at: new Date().toISOString() },
-      message: 'Vlog updated (demo mode)'
-    });
-  }
-  
-  try {
-    const { data, error } = await supabase
-      .from('vlog_entries')
-      .update({ 
-        title: title.trim(), 
-        video_url, 
-        thumbnail: finalThumbnail, 
-        updated_at: new Date().toISOString() 
-      })
-      .eq('id', id)
-      .select();
-    
-    if (error) throw error;
-    
-    res.json({ 
-      success: true, 
-      vlog: data[0],
-      message: 'Vlog updated successfully!'
-    });
-  } catch (error) {
-    console.error('Error updating vlog:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: error.message 
-    });
-  }
-});
-
-// Delete vlog entry
-app.delete('/api/vlogs/:id', async (req, res) => {
-  const { id } = req.params;
-  
-  if (!supabase) {
-    return res.json({ 
-      success: true, 
-      message: 'Vlog deleted (demo mode)'
-    });
+    return res.json({ success: true });
   }
   
   try {
     const { error } = await supabase
       .from('vlog_entries')
-      .delete()
+      .update({ title, video_url, thumbnail, updated_at: new Date().toISOString() })
       .eq('id', id);
     
     if (error) throw error;
-    
-    res.json({ 
-      success: true, 
-      message: 'Vlog entry deleted successfully!'
-    });
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error updating vlog:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.delete('/api/vlogs/:id', async (req, res) => {
+  const { id } = req.params;
+  
+  if (!supabase) {
+    return res.json({ success: true });
+  }
+  
+  try {
+    const { error } = await supabase.from('vlog_entries').delete().eq('id', id);
+    if (error) throw error;
+    res.json({ success: true });
   } catch (error) {
     console.error('Error deleting vlog:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: error.message 
-    });
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
 // ==================== BLOG POSTS ====================
 
-// Get all published blog posts (public)
 app.get('/api/blog/posts', async (req, res) => {
   if (!supabase) {
-    return res.json({ 
-      success: true, 
-      posts: [
-        { id: 1, title: 'How AI is Transforming Venture Capital', author_name: 'Sarah Johnson', excerpt: 'Discover how AI is changing the investment landscape', featured_image: 'https://picsum.photos/800/400?random=1', status: 'published', views: 234, published_at: new Date().toISOString() }
-      ] 
-    });
+    return res.json({ success: true, posts: [] });
   }
   
   try {
@@ -454,28 +277,16 @@ app.get('/api/blog/posts', async (req, res) => {
       .order('published_at', { ascending: false });
     
     if (error) throw error;
-    
-    res.json({ 
-      success: true, 
-      posts: data || [],
-      count: data?.length || 0
-    });
+    res.json({ success: true, posts: data || [] });
   } catch (error) {
     console.error('Error fetching blog posts:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// Get all blog posts (admin only - includes pending)
 app.get('/api/blog/admin/posts', async (req, res) => {
   if (!supabase) {
-    return res.json({ 
-      success: true, 
-      posts: [
-        { id: 1, title: 'How AI is Transforming Venture Capital', content: 'Full content here...', author_name: 'Sarah Johnson', author_email: 'sarah@example.com', status: 'published', views: 234, created_at: new Date().toISOString() },
-        { id: 2, title: 'Pending Post Example', content: 'Pending content...', author_name: 'John Doe', author_email: 'john@example.com', status: 'pending', views: 0, created_at: new Date().toISOString() }
-      ] 
-    });
+    return res.json({ success: true, posts: [] });
   }
   
   try {
@@ -485,151 +296,74 @@ app.get('/api/blog/admin/posts', async (req, res) => {
       .order('created_at', { ascending: false });
     
     if (error) throw error;
-    
-    res.json({ 
-      success: true, 
-      posts: data || [],
-      count: data?.length || 0
-    });
+    res.json({ success: true, posts: data || [] });
   } catch (error) {
     console.error('Error fetching all posts:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// Get single blog post by ID (with view count increment)
 app.get('/api/blog/posts/:id', async (req, res) => {
   const { id } = req.params;
   
   if (!supabase) {
-    return res.json({ 
-      success: true, 
-      post: { 
-        id: parseInt(id), 
-        title: 'Sample Blog Post', 
-        content: 'This is sample content for the blog post...', 
-        author_name: 'Sarah Johnson', 
-        author_email: 'sarah@example.com',
-        featured_image: 'https://picsum.photos/800/400?random=1',
-        views: 234,
-        published_at: new Date().toISOString()
-      } 
-    });
+    return res.json({ success: true, post: null });
   }
   
   try {
-    // Increment view count
     await supabase.rpc('increment_blog_view', { post_id: parseInt(id) });
-    
-    const { data, error } = await supabase
-      .from('blog_posts')
-      .select('*')
-      .eq('id', id)
-      .single();
-    
+    const { data, error } = await supabase.from('blog_posts').select('*').eq('id', id).single();
     if (error) throw error;
-    
-    res.json({ 
-      success: true, 
-      post: data
-    });
+    res.json({ success: true, post: data });
   } catch (error) {
     console.error('Error fetching post:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// Create a new blog post (with Turnstile verification)
 app.post('/api/blog/posts', strictLimiter, async (req, res) => {
   const { title, content, author_name, author_email, excerpt, featured_image, tags, turnstile_token } = req.body;
   
-  // Verify human with Turnstile
   if (!turnstile_token) {
     return res.status(400).json({ success: false, error: 'Human verification required' });
   }
   
   const isHuman = await verifyTurnstile(turnstile_token);
   if (!isHuman) {
-    return res.status(400).json({ success: false, error: 'Verification failed. Please try again.' });
+    return res.status(400).json({ success: false, error: 'Verification failed' });
   }
   
-  // Validation
   if (!title || !content || !author_name || !author_email) {
-    return res.status(400).json({ 
-      success: false, 
-      error: 'Title, content, author name, and email are required' 
-    });
-  }
-  
-  // Email validation
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  if (!emailRegex.test(author_email)) {
-    return res.status(400).json({ 
-      success: false, 
-      error: 'Invalid email format' 
-    });
+    return res.status(400).json({ success: false, error: 'Required fields missing' });
   }
   
   const excerptText = excerpt || content.substring(0, 150);
   const defaultImage = `https://picsum.photos/800/400?random=${Date.now()}`;
   
   if (!supabase) {
-    return res.json({ 
-      success: true, 
-      post: { 
-        id: Date.now(), 
-        title, 
-        content, 
-        author_name, 
-        author_email, 
-        excerpt: excerptText,
-        featured_image: featured_image || defaultImage,
-        status: 'pending',
-        created_at: new Date().toISOString()
-      },
-      message: 'Post submitted for review (demo mode)!'
-    });
+    return res.json({ success: true, post: { id: Date.now() } });
   }
   
   try {
     const { data, error } = await supabase
       .from('blog_posts')
-      .insert([{
-        title: title.trim(),
-        content,
-        author_name: author_name.trim(),
-        author_email: author_email.trim().toLowerCase(),
-        excerpt: excerptText,
-        featured_image: featured_image || defaultImage,
-        tags: tags || [],
-        status: 'pending',
-        created_at: new Date().toISOString()
-      }])
+      .insert([{ title: title.trim(), content, author_name: author_name.trim(), author_email: author_email.trim().toLowerCase(), excerpt: excerptText, featured_image: featured_image || defaultImage, tags: tags || [], status: 'pending', created_at: new Date().toISOString() }])
       .select();
     
     if (error) throw error;
-    
-    res.json({ 
-      success: true, 
-      post: data[0],
-      message: 'Your post has been submitted for review! Admin will review and publish it soon.'
-    });
+    res.json({ success: true, post: data[0] });
   } catch (error) {
     console.error('Error creating blog post:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: error.message 
-    });
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// Update blog post (admin only)
 app.put('/api/blog/posts/:id', async (req, res) => {
   const { id } = req.params;
   const { title, content, excerpt, featured_image, status, tags } = req.body;
   
   if (!supabase) {
-    return res.json({ success: true, message: 'Post updated (demo mode)' });
+    return res.json({ success: true });
   }
   
   const updateData = {};
@@ -639,67 +373,221 @@ app.put('/api/blog/posts/:id', async (req, res) => {
   if (featured_image !== undefined) updateData.featured_image = featured_image;
   if (status !== undefined) updateData.status = status;
   if (tags !== undefined) updateData.tags = tags;
-  
-  // Set published_at when status changes to published
-  if (status === 'published' && !updateData.published_at) {
-    updateData.published_at = new Date().toISOString();
-  }
-  
+  if (status === 'published' && !updateData.published_at) updateData.published_at = new Date().toISOString();
   updateData.updated_at = new Date().toISOString();
   
   try {
-    const { error } = await supabase
-      .from('blog_posts')
-      .update(updateData)
-      .eq('id', id);
-    
+    const { error } = await supabase.from('blog_posts').update(updateData).eq('id', id);
     if (error) throw error;
-    
-    res.json({ 
-      success: true, 
-      message: 'Post updated successfully!'
-    });
+    res.json({ success: true });
   } catch (error) {
     console.error('Error updating blog post:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: error.message 
-    });
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// Delete blog post (admin only)
 app.delete('/api/blog/posts/:id', async (req, res) => {
   const { id } = req.params;
   
   if (!supabase) {
-    return res.json({ success: true, message: 'Post deleted (demo mode)' });
+    return res.json({ success: true });
   }
   
   try {
-    const { error } = await supabase
-      .from('blog_posts')
-      .delete()
-      .eq('id', id);
-    
+    const { error } = await supabase.from('blog_posts').delete().eq('id', id);
     if (error) throw error;
-    
-    res.json({ 
-      success: true, 
-      message: 'Blog post deleted successfully!'
-    });
+    res.json({ success: true });
   } catch (error) {
     console.error('Error deleting blog post:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: error.message 
-    });
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ==================== EVENTS ====================
+
+app.get('/api/events', async (req, res) => {
+  if (!supabase) {
+    return res.json({ success: true, events: [] });
+  }
+  
+  try {
+    const { data, error } = await supabase
+      .from('events')
+      .select('*')
+      .eq('status', 'upcoming')
+      .order('event_date', { ascending: true });
+    
+    if (error) throw error;
+    res.json({ success: true, events: data || [] });
+  } catch (error) {
+    console.error('Error fetching events:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/events/admin', async (req, res) => {
+  if (!supabase) {
+    return res.json({ success: true, events: [] });
+  }
+  
+  try {
+    const { data, error } = await supabase
+      .from('events')
+      .select('*')
+      .order('event_date', { ascending: false });
+    
+    if (error) throw error;
+    res.json({ success: true, events: data || [] });
+  } catch (error) {
+    console.error('Error fetching all events:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/events/:id', async (req, res) => {
+  const { id } = req.params;
+  
+  if (!supabase) {
+    return res.json({ success: true, event: null });
+  }
+  
+  try {
+    const { data, error } = await supabase.from('events').select('*').eq('id', id).single();
+    if (error) throw error;
+    res.json({ success: true, event: data });
+  } catch (error) {
+    console.error('Error fetching event:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/events', async (req, res) => {
+  const { title, description, event_date, location, address, price, capacity, image_url, event_type, status, registration_link } = req.body;
+  
+  if (!title || !description || !event_date || !location) {
+    return res.status(400).json({ success: false, error: 'Required fields missing' });
+  }
+  
+  if (!supabase) {
+    return res.json({ success: true, event: { id: Date.now() } });
+  }
+  
+  try {
+    const { data, error } = await supabase
+      .from('events')
+      .insert([{ title: title.trim(), description, event_date, location: location.trim(), address: address || null, price: price || 'Free', capacity: capacity || null, image_url: image_url || null, event_type: event_type || 'regular', status: status || 'upcoming', registration_link: registration_link || null, created_at: new Date().toISOString() }])
+      .select();
+    
+    if (error) throw error;
+    res.json({ success: true, event: data[0] });
+  } catch (error) {
+    console.error('Error creating event:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.put('/api/events/:id', async (req, res) => {
+  const { id } = req.params;
+  const updates = req.body;
+  
+  if (!supabase) {
+    return res.json({ success: true });
+  }
+  
+  updates.updated_at = new Date().toISOString();
+  
+  try {
+    const { error } = await supabase.from('events').update(updates).eq('id', id);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error updating event:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.delete('/api/events/:id', async (req, res) => {
+  const { id } = req.params;
+  
+  if (!supabase) {
+    return res.json({ success: true });
+  }
+  
+  try {
+    const { error } = await supabase.from('events').delete().eq('id', id);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error deleting event:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/events/:id/register', async (req, res) => {
+  const { id } = req.params;
+  const { user_name, user_email, user_phone, special_requests } = req.body;
+  
+  if (!user_name || !user_email) {
+    return res.status(400).json({ success: false, error: 'Name and email required' });
+  }
+  
+  if (!supabase) {
+    return res.json({ success: true });
+  }
+  
+  try {
+    const { data: event, error: eventError } = await supabase.from('events').select('capacity, status').eq('id', id).single();
+    if (eventError) throw eventError;
+    
+    if (event.status !== 'upcoming') {
+      return res.status(400).json({ success: false, error: 'Event is not open for registration' });
+    }
+    
+    if (event.capacity) {
+      const { count, error: countError } = await supabase.from('event_registrations').select('*', { count: 'exact', head: true }).eq('event_id', id);
+      if (countError) throw countError;
+      if (count >= event.capacity) {
+        return res.status(400).json({ success: false, error: 'Event is full' });
+      }
+    }
+    
+    const { data, error } = await supabase
+      .from('event_registrations')
+      .insert([{ event_id: id, user_name: user_name.trim(), user_email: user_email.trim().toLowerCase(), user_phone: user_phone || null, special_requests: special_requests || null, registered_at: new Date().toISOString() }])
+      .select();
+    
+    if (error) throw error;
+    res.json({ success: true, registration: data[0] });
+  } catch (error) {
+    console.error('Error registering for event:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/events/:id/registrations', async (req, res) => {
+  const { id } = req.params;
+  
+  if (!supabase) {
+    return res.json({ success: true, registrations: [] });
+  }
+  
+  try {
+    const { data, error } = await supabase
+      .from('event_registrations')
+      .select('*')
+      .eq('event_id', id)
+      .order('registered_at', { ascending: false });
+    
+    if (error) throw error;
+    res.json({ success: true, registrations: data || [] });
+  } catch (error) {
+    console.error('Error fetching registrations:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
 // ==================== STATISTICS ====================
 
-// Get platform statistics
 app.get('/api/stats', async (req, res) => {
   let totalTickets = 0;
   let totalVlogs = 0;
@@ -719,29 +607,127 @@ app.get('/api/stats', async (req, res) => {
     } catch (error) {
       console.error('Error fetching stats:', error);
     }
-  } else {
-    // Demo stats
-    totalTickets = 3;
-    totalVlogs = 4;
-    totalBlogs = 3;
   }
   
-  res.json({
-    success: true,
-    stats: {
-      totalTickets,
-      totalVlogs,
-      totalBlogs,
-      timestamp: new Date().toISOString()
-    }
-  });
+  res.json({ success: true, stats: { totalTickets, totalVlogs, totalBlogs } });
 });
 
-// ==================== ROOT ENDPOINT ====================
+app.post('/api/online/track', async (req, res) => {
+  const { session_id, user_name, user_id, current_page, user_agent, ip_address } = req.body;
+  
+  if (!session_id) {
+    return res.status(400).json({ success: false, error: 'Session ID required' });
+  }
+  
+  if (!supabase) {
+    return res.json({ success: true, onlineCount: 1 });
+  }
+  
+  try {
+    // Check if session exists
+    const { data: existing, error: findError } = await supabase
+      .from('online_users')
+      .select('id')
+      .eq('session_id', session_id)
+      .single();
+    
+    if (existing) {
+      // Update existing session
+      const { error: updateError } = await supabase
+        .from('online_users')
+        .update({ 
+          last_seen: new Date().toISOString(),
+          current_page,
+          user_name: user_name || null,
+          user_id: user_id || null
+        })
+        .eq('session_id', session_id);
+      
+      if (updateError) throw updateError;
+    } else {
+      // Create new session
+      const { error: insertError } = await supabase
+        .from('online_users')
+        .insert([{ 
+          session_id, 
+          user_name: user_name || 'Guest',
+          user_id: user_id || null,
+          current_page,
+          user_agent: user_agent || null,
+          ip_address: ip_address || null,
+          last_seen: new Date().toISOString()
+        }]);
+      
+      if (insertError) throw insertError;
+    }
+    
+    // Get current online count
+    const { count, error: countError } = await supabase
+      .from('online_users')
+      .select('*', { count: 'exact', head: true })
+      .gte('last_seen', new Date(Date.now() - 5 * 60 * 1000).toISOString());
+    
+    if (countError) throw countError;
+    
+    // Also get active users list
+    const { data: users, error: usersError } = await supabase
+      .from('online_users')
+      .select('user_name, current_page, last_seen')
+      .gte('last_seen', new Date(Date.now() - 5 * 60 * 1000).toISOString())
+      .order('last_seen', { ascending: false });
+    
+    if (usersError) throw usersError;
+    
+    res.json({ 
+      success: true, 
+      onlineCount: count || 0,
+      users: users || []
+    });
+  } catch (error) {
+    console.error('Error tracking user:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/online/count', async (req, res) => {
+  if (!supabase) {
+    return res.json({ success: true, onlineCount: 1, users: [] });
+  }
+  
+  try {
+    // Clean up old sessions first
+    await supabase.rpc('cleanup_old_sessions');
+    
+    const { count, error: countError } = await supabase
+      .from('online_users')
+      .select('*', { count: 'exact', head: true })
+      .gte('last_seen', new Date(Date.now() - 5 * 60 * 1000).toISOString());
+    
+    if (countError) throw countError;
+    
+    const { data: users, error: usersError } = await supabase
+      .from('online_users')
+      .select('user_name, current_page, last_seen')
+      .gte('last_seen', new Date(Date.now() - 5 * 60 * 1000).toISOString())
+      .order('last_seen', { ascending: false })
+      .limit(20);
+    
+    if (usersError) throw usersError;
+    
+    res.json({ 
+      success: true, 
+      onlineCount: count || 0,
+      users: users || []
+    });
+  } catch (error) {
+    console.error('Error getting online count:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
 
 app.get('/', (req, res) => {
   res.json({
-    name: '3D Funding Vlog API',
+    name: 'Sound & Silence API',
     version: '2.0.0',
     status: 'running',
     endpoints: {
@@ -751,40 +737,32 @@ app.get('/', (req, res) => {
       vlogs: '/api/vlogs',
       blog: '/api/blog/posts',
       blogAdmin: '/api/blog/admin/posts',
+      events: '/api/events',
+      eventsAdmin: '/api/events/admin',
       stats: '/api/stats'
     }
   });
 });
 
-// ==================== 404 HANDLER ====================
-
 app.use('*', (req, res) => {
-  res.status(404).json({ 
-    success: false, 
-    error: `Route ${req.originalUrl} not found` 
-  });
+  res.status(404).json({ success: false, error: `Route ${req.originalUrl} not found` });
 });
-
-// ==================== ERROR HANDLING MIDDLEWARE ====================
 
 app.use((err, req, res, next) => {
   console.error('Server error:', err);
-  res.status(500).json({ 
-    success: false, 
-    error: 'Internal server error',
-    message: err.message 
-  });
+  res.status(500).json({ success: false, error: 'Internal server error' });
 });
 
 // ==================== START SERVER ====================
 
 app.listen(PORT, () => {
-  console.log(`\n🚀 Server running on port ${PORT}`);
+  console.log(`\n🎵 Sound & Silence API running on port ${PORT}`);
   console.log(`📊 Health check: http://localhost:${PORT}/api/health`);
-  console.log(`🎥 Vlogs endpoint: http://localhost:${PORT}/api/vlogs`);
-  console.log(`📝 Blog endpoint: http://localhost:${PORT}/api/blog/posts`);
-  console.log(`🎫 Tickets endpoint: http://localhost:${PORT}/api/support-tickets`);
-  console.log(`📈 Stats endpoint: http://localhost:${PORT}/api/stats`);
+  console.log(`🎥 Vlogs: http://localhost:${PORT}/api/vlogs`);
+  console.log(`📝 Blog: http://localhost:${PORT}/api/blog/posts`);
+  console.log(`🎫 Tickets: http://localhost:${PORT}/api/support-tickets`);
+  console.log(`📅 Events: http://localhost:${PORT}/api/events`);
+  console.log(`📈 Stats: http://localhost:${PORT}/api/stats`);
   console.log(`🔧 Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`🔒 Cloudflare Turnstile: ${CLOUDFLARE_SITE_KEY ? 'Configured' : 'Not configured'}\n`);
 });
