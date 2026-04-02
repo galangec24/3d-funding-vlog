@@ -191,7 +191,10 @@ app.get('/api/users/stats/age', async (req, res) => {
       stats: {
         totalUsers: 0,
         ageGroups: { child: 0, teenager: 0, youngAdult: 0, adult: 0, senior: 0 },
-        ages: []
+        ages: [],
+        averageAge: 0,
+        minAge: null,
+        maxAge: null
       }
     });
   }
@@ -225,7 +228,7 @@ app.get('/api/users/stats/age', async (req, res) => {
           age--;
         }
         
-        if (age >= 0) {
+        if (age >= 0 && age < 120) { // Sanity check
           ages.push(age);
           if (age <= 12) ageGroups.child++;
           else if (age <= 19) ageGroups.teenager++;
@@ -236,20 +239,34 @@ app.get('/api/users/stats/age', async (req, res) => {
       }
     });
     
+    const averageAge = ages.length > 0 ? Math.round(ages.reduce((a, b) => a + b, 0) / ages.length) : 0;
+    const minAge = ages.length > 0 ? Math.min(...ages) : null;
+    const maxAge = ages.length > 0 ? Math.max(...ages) : null;
+    
     res.json({ 
       success: true, 
       stats: {
         totalUsers,
         ageGroups,
         ages: ages.sort((a, b) => a - b),
-        averageAge: ages.length > 0 ? Math.round(ages.reduce((a, b) => a + b, 0) / ages.length) : 0,
-        minAge: ages.length > 0 ? Math.min(...ages) : null,
-        maxAge: ages.length > 0 ? Math.max(...ages) : null
+        averageAge,
+        minAge,
+        maxAge
       }
     });
   } catch (error) {
     console.error('Error fetching age stats:', error);
-    res.status(500).json({ success: false, error: error.message });
+    res.status(500).json({ 
+      success: false, 
+      error: error.message,
+      stats: {
+        totalUsers: 0,
+        ageGroups: { child: 0, teenager: 0, youngAdult: 0, adult: 0, senior: 0 },
+        averageAge: 0,
+        minAge: null,
+        maxAge: null
+      }
+    });
   }
 });
 
