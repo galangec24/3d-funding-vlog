@@ -10,6 +10,12 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// ==================== PROXY TRUST SETTING (CRITICAL FOR RENDER) ====================
+// Enable this to trust the 'X-Forwarded-For' header set by Render's proxy.
+// This fixes the ERR_ERL_UNEXPECTED_X_FORWARDED_FOR warning.
+app.set('trust proxy', 1);
+console.log('✅ Trust proxy setting enabled for correct IP detection behind Render proxy');
+
 // Middleware
 app.use(cors({
   origin: ['http://localhost:5173', 'https://soundandsilence.web.app', 'https://soundandsilence.firebaseapp.com', 'https://d-funding-blog.web.app'],
@@ -40,6 +46,119 @@ try {
   }
 } catch (error) {
   console.log('⚠️ Email service not configured:', error.message);
+}
+
+// ==================== IP-BASED RATE LIMITING FOR ALL FORMS ====================
+
+// Store for tracking submissions by IP
+const submissionTracker = new Map();
+
+// Clean up old entries every hour
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, data] of submissionTracker.entries()) {
+    // Remove entries older than 24 hours
+    if (now - data.timestamp > 24 * 60 * 60 * 1000) {
+      submissionTracker.delete(key);
+    }
+  }
+  console.log(`🧹 Cleaned up old rate limit entries. Current size: ${submissionTracker.size}`);
+}, 60 * 60 * 1000);
+
+// Helper function to get client IP (respects proxy)
+function getClientIp(req) {
+  // The 'trust proxy' setting ensures req.ip contains the correct client IP
+  return req.ip || req.socket.remoteAddress || 'unknown';
+}
+
+// Helper function to check rate limit
+function checkRateLimit(ip, formType) {
+  const now = Date.now();
+  const key = `${ip}:${formType}`;
+  const record = submissionTracker.get(key);
+  
+  // Define limits per form type
+  const limits = {
+    contact: { maxPerDay: 3, cooldownMinutes: 5 },
+    support: { maxPerDay: 5, cooldownMinutes: 2 },
+    volunteer: { maxPerDay: 2, cooldownMinutes: 10 },
+    partner: { maxPerDay: 2, cooldownMinutes: 10 },
+    donate: { maxPerDay: 2, cooldownMinutes: 10 }
+  };
+  
+  const limit = limits[formType] || { maxPerDay: 3, cooldownMinutes: 5 };
+  
+  if (!record) {
+    return { allowed: true, remaining: limit.maxPerDay, resetTime: null };
+  }
+  
+  // Check cooldown (prevent rapid submissions)
+  const secondsSinceLast = (now - record.lastSubmission) / 1000;
+  const cooldownSeconds = limit.cooldownMinutes * 60;
+  if (secondsSinceLast < cooldownSeconds) {
+    const waitSeconds = Math.ceil(cooldownSeconds - secondsSinceLast);
+    return { 
+      allowed: false, 
+      reason: `Please wait ${waitSeconds} seconds before submitting again.`,
+      waitSeconds,
+      remaining: record.remaining
+    };
+  }
+  
+  // Check daily limit
+  const hoursSinceFirst = (now - record.timestamp) / (1000 * 60 * 60);
+  if (hoursSinceFirst >= 24) {
+    // Reset after 24 hours
+    submissionTracker.delete(key);
+    return { allowed: true, remaining: limit.maxPerDay, resetTime: null };
+  }
+  
+  const remaining = Math.max(0, limit.maxPerDay - record.count);
+  
+  if (record.count >= limit.maxPerDay) {
+    const resetHours = 24 - hoursSinceFirst;
+    return { 
+      allowed: false, 
+      reason: `Daily limit reached. You can submit again in ${Math.ceil(resetHours)} hours.`,
+      remaining: 0,
+      resetHours: Math.ceil(resetHours)
+    };
+  }
+  
+  return { allowed: true, remaining: remaining - 1, resetTime: null };
+}
+
+// Helper function to record submission
+function recordSubmission(ip, formType) {
+  const now = Date.now();
+  const key = `${ip}:${formType}`;
+  const existing = submissionTracker.get(key);
+  
+  const limits = {
+    contact: { maxPerDay: 3 },
+    support: { maxPerDay: 5 },
+    volunteer: { maxPerDay: 2 },
+    partner: { maxPerDay: 2 },
+    donate: { maxPerDay: 2 }
+  };
+  
+  const limit = limits[formType] || { maxPerDay: 3 };
+  
+  if (!existing) {
+    submissionTracker.set(key, {
+      count: 1,
+      timestamp: now,
+      lastSubmission: now,
+      remaining: limit.maxPerDay - 1
+    });
+  } else {
+    submissionTracker.set(key, {
+      count: existing.count + 1,
+      timestamp: existing.timestamp,
+      lastSubmission: now,
+      remaining: limit.maxPerDay - (existing.count + 1)
+    });
+  }
 }
 
 // ==================== PROFESSIONAL EMAIL TEMPLATES ====================
@@ -402,27 +521,30 @@ async function verifyTurnstile(token) {
   }
 }
 
-// Rate limiting
+// ==================== RATE LIMITING MIDDLEWARE WITH PROXY SUPPORT ====================
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
   message: 'Too many requests from this IP, please try again later.',
   standardHeaders: true,
   legacyHeaders: false,
+  // Use custom keyGenerator to ensure correct IP is used
+  keyGenerator: (req) => getClientIp(req),
 });
 app.use('/api/', limiter);
 
-// Stricter rate limit for login/submissions
 const strictLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 5,
   skipSuccessfulRequests: true,
   message: 'Too many attempts. Please try again later.',
+  keyGenerator: (req) => getClientIp(req),
 });
 
 // Request logging middleware
 app.use((req, res, next) => {
-  console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
+  const clientIp = getClientIp(req);
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.path} - Client IP: ${clientIp}`);
   next();
 });
 
@@ -473,10 +595,42 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// ==================== CONTACT FORM ====================
+// ==================== RATE LIMIT STATUS ENDPOINT ====================
+
+app.get('/api/rate-limit-status', (req, res) => {
+  const ip = getClientIp(req);
+  const formType = req.query.type || 'contact';
+  
+  const result = checkRateLimit(ip, formType);
+  res.json({
+    success: true,
+    allowed: result.allowed,
+    remaining: result.remaining || 0,
+    reason: result.reason || null,
+    waitSeconds: result.waitSeconds || null,
+    resetHours: result.resetHours || null
+  });
+});
+
+// ==================== CONTACT FORM WITH RATE LIMITING ====================
 
 app.post('/api/contact', async (req, res) => {
   const { firstName, lastName, email, message, turnstile_token, supportType } = req.body;
+  const ip = getClientIp(req);
+  
+  // Check rate limit first
+  const rateLimitResult = checkRateLimit(ip, 'contact');
+  if (!rateLimitResult.allowed) {
+    return res.status(429).json({ 
+      success: false, 
+      error: rateLimitResult.reason,
+      rateLimit: {
+        remaining: rateLimitResult.remaining,
+        resetHours: rateLimitResult.resetHours,
+        waitSeconds: rateLimitResult.waitSeconds
+      }
+    });
+  }
   
   if (!turnstile_token) {
     return res.status(400).json({ success: false, error: 'Verification required' });
@@ -490,6 +644,9 @@ app.post('/api/contact', async (req, res) => {
   if (!firstName || !lastName || !email || !message) {
     return res.status(400).json({ success: false, error: 'All fields required' });
   }
+  
+  // Record the submission
+  recordSubmission(ip, 'contact');
   
   // Send email to admin
   await sendContactEmailToAdmin({ firstName, lastName, email, message, supportType });
@@ -508,6 +665,7 @@ app.post('/api/contact', async (req, res) => {
           email: email.trim().toLowerCase(),
           message: message.trim(),
           support_type: supportType || null,
+          ip_address: ip,
           status: 'unread',
           created_at: new Date().toISOString()
         }]);
@@ -518,7 +676,14 @@ app.post('/api/contact', async (req, res) => {
     }
   }
   
-  res.json({ success: true, message: 'Message sent successfully! We\'ll get back to you soon.' });
+  res.json({ 
+    success: true, 
+    message: 'Message sent successfully! We\'ll get back to you soon.',
+    rateLimit: {
+      remaining: rateLimitResult.remaining,
+      message: `You have ${rateLimitResult.remaining} submission${rateLimitResult.remaining !== 1 ? 's' : ''} remaining today.`
+    }
+  });
 });
 
 app.get('/api/contact/messages', async (req, res) => {
@@ -539,7 +704,7 @@ app.get('/api/contact/messages', async (req, res) => {
   }
 });
 
-// ==================== SUPPORT TICKETS ====================
+// ==================== SUPPORT TICKETS WITH RATE LIMITING ====================
 
 app.get('/api/support-tickets', async (req, res) => {
   if (!supabase) return res.json({ success: true, tickets: [] });
@@ -554,6 +719,13 @@ app.get('/api/support-tickets', async (req, res) => {
 
 app.post('/api/support-tickets', strictLimiter, async (req, res) => {
   const { name, email, message, turnstile_token } = req.body;
+  const ip = getClientIp(req);
+  
+  // Check rate limit
+  const rateLimitResult = checkRateLimit(ip, 'support');
+  if (!rateLimitResult.allowed) {
+    return res.status(429).json({ success: false, error: rateLimitResult.reason });
+  }
   
   if (!turnstile_token) {
     return res.status(400).json({ success: false, error: 'Verification required' });
@@ -567,6 +739,9 @@ app.post('/api/support-tickets', strictLimiter, async (req, res) => {
   if (!name || !email || !message) {
     return res.status(400).json({ success: false, error: 'All fields required' });
   }
+  
+  // Record submission
+  recordSubmission(ip, 'support');
   
   // Send email notification to admin
   await sendSupportTicketEmailToAdmin({ name, email, message });
@@ -583,6 +758,7 @@ app.post('/api/support-tickets', strictLimiter, async (req, res) => {
         email: email.trim().toLowerCase(), 
         message: message.trim(), 
         status: 'open', 
+        ip_address: ip,
         created_at: new Date().toISOString() 
       }])
       .select();
@@ -607,10 +783,17 @@ app.put('/api/support-tickets/:id', async (req, res) => {
   }
 });
 
-// ==================== SUPPORT US (Volunteer/Partner/Donate) ====================
+// ==================== SUPPORT US (Volunteer/Partner/Donate) WITH RATE LIMITING ====================
 
 app.post('/api/support-us', async (req, res) => {
   const { firstName, lastName, email, phone, message, interests, availability, organization, donationAmount, supportType, turnstile_token } = req.body;
+  const ip = getClientIp(req);
+  
+  // Check rate limit based on support type
+  const rateLimitResult = checkRateLimit(ip, supportType);
+  if (!rateLimitResult.allowed) {
+    return res.status(429).json({ success: false, error: rateLimitResult.reason });
+  }
   
   if (!turnstile_token) {
     return res.status(400).json({ success: false, error: 'Verification required' });
@@ -624,6 +807,9 @@ app.post('/api/support-us', async (req, res) => {
   if (!firstName || !lastName || !email) {
     return res.status(400).json({ success: false, error: 'Name and email required' });
   }
+  
+  // Record submission
+  recordSubmission(ip, supportType);
   
   // Send email notification to admin
   await sendSupportInquiryEmailToAdmin({
@@ -648,6 +834,7 @@ app.post('/api/support-us', async (req, res) => {
         organization: organization || null,
         donation_amount: donationAmount || null,
         support_type: supportType,
+        ip_address: ip,
         status: 'pending',
         created_at: new Date().toISOString()
       }]);
@@ -1176,6 +1363,8 @@ app.listen(PORT, () => {
   console.log(`\n🎵 Sound & Silence API running on port ${PORT}`);
   console.log(`📊 Health: http://localhost:${PORT}/api/health`);
   console.log(`📧 Email: ${emailTransporter ? 'Configured' : 'Not configured'}`);
+  console.log(`🔒 Trust Proxy: Enabled for correct IP detection on Render`);
+  console.log(`📋 Rate Limiting: Active (3-5 submissions per IP per day)`);
   console.log(`🎥 Vlogs: http://localhost:${PORT}/api/vlogs`);
   console.log(`📝 Blog: http://localhost:${PORT}/api/blog/posts`);
   console.log(`🎫 Tickets: http://localhost:${PORT}/api/support-tickets`);
