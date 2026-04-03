@@ -983,15 +983,19 @@ app.get('/api/users/count', async (req, res) => {
   }
   
   try {
+    // Count all users in app_users table
     const { count, error } = await supabase
       .from('app_users')
       .select('*', { count: 'exact', head: true });
     
     if (error) throw error;
+    
+    console.log(`Total users count: ${count || 0}`);
+    // Return count directly, not wrapped in user object
     res.json({ success: true, count: count || 0 });
   } catch (error) {
     console.error('Error fetching user count:', error);
-    res.status(500).json({ success: false, error: error.message });
+    res.status(500).json({ success: false, error: error.message, count: 0 });
   }
 });
 
