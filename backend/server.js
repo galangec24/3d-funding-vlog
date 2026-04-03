@@ -42,7 +42,7 @@ try {
   console.log('⚠️ Email service not configured:', error.message);
 }
 
-// ==================== EMAIL FUNCTIONS ====================
+// ==================== PROFESSIONAL EMAIL TEMPLATES ====================
 
 // Send contact form email to admin
 async function sendContactEmailToAdmin(data) {
@@ -52,24 +52,63 @@ async function sendContactEmailToAdmin(data) {
   }
   
   const { firstName, lastName, email, message, supportType } = data;
+  const currentDate = new Date().toLocaleString('en-GB', { timeZone: 'Europe/London' });
   
   const mailOptions = {
-    from: process.env.EMAIL_USER,
+    from: `"${firstName} ${lastName} via Sound & Silence" <${process.env.EMAIL_USER}>`,
+    replyTo: email,
     to: process.env.ADMIN_EMAIL || process.env.EMAIL_USER,
-    subject: `📧 New Contact Message from ${firstName} ${lastName}`,
+    subject: `📬 New Contact Form Submission from ${firstName} ${lastName}`,
     html: `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 10px;">
-        <h2 style="color: #8b5cf6;">New Contact Form Submission</h2>
-        <div style="background: #f9fafb; padding: 15px; border-radius: 8px; margin: 15px 0;">
-          <p style="margin: 5px 0;"><strong>Name:</strong> ${firstName} ${lastName}</p>
-          <p style="margin: 5px 0;"><strong>Email:</strong> <a href="mailto:${email}">${email}</a></p>
-          ${supportType ? `<p style="margin: 5px 0;"><strong>Inquiry Type:</strong> ${supportType}</p>` : ''}
-          <p style="margin: 5px 0;"><strong>Message:</strong></p>
-          <p style="margin: 10px 0 0 0; white-space: pre-wrap;">${message}</p>
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>New Contact Form Submission</title>
+        <style>
+          body { font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; color: #333; }
+          .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+          .header { background: linear-gradient(135deg, #8b5cf6, #ec4899); padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }
+          .header h1 { color: white; margin: 0; font-size: 24px; }
+          .content { background: #f9fafb; padding: 30px; border-radius: 0 0 10px 10px; border: 1px solid #e5e7eb; border-top: none; }
+          .info-box { background: white; padding: 20px; border-radius: 8px; margin: 15px 0; border-left: 4px solid #8b5cf6; }
+          .label { font-weight: bold; color: #4b5563; margin-bottom: 5px; }
+          .value { color: #1f2937; margin-bottom: 15px; }
+          .message-box { background: #f3f4f6; padding: 15px; border-radius: 8px; margin-top: 10px; white-space: pre-wrap; }
+          .footer { text-align: center; padding: 20px; font-size: 12px; color: #6b7280; border-top: 1px solid #e5e7eb; margin-top: 20px; }
+          .reply-note { background: #fef3c7; padding: 10px; border-radius: 5px; margin-top: 15px; text-align: center; font-size: 13px; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <h1>🎵 Sound & Silence</h1>
+            <p style="color: rgba(255,255,255,0.9); margin: 5px 0 0;">New Contact Form Submission</p>
+          </div>
+          <div class="content">
+            <div class="info-box">
+              <div class="label">📋 Submission Details</div>
+              <div class="value">Date: ${currentDate}</div>
+              <div class="label">👤 From:</div>
+              <div class="value">${firstName} ${lastName}</div>
+              <div class="label">📧 Email:</div>
+              <div class="value"><a href="mailto:${email}" style="color: #8b5cf6;">${email}</a></div>
+              ${supportType ? `<div class="label">🏷️ Inquiry Type:</div><div class="value">${supportType.charAt(0).toUpperCase() + supportType.slice(1)}</div>` : ''}
+              <div class="label">💬 Message:</div>
+              <div class="message-box">${message.replace(/\n/g, '<br>')}</div>
+            </div>
+            <div class="reply-note">
+              💡 <strong>Quick Reply:</strong> Simply click "Reply" to respond directly to ${firstName} at ${email}
+            </div>
+          </div>
+          <div class="footer">
+            <p>Sound & Silence — Science-based sober events in East London</p>
+            <p>© ${new Date().getFullYear()} Sound & Silence. All rights reserved.</p>
+          </div>
         </div>
-        <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;">
-        <p style="color: #6b7280; font-size: 12px;">Reply directly to this email to respond to ${firstName}.</p>
-      </div>
+      </body>
+      </html>
     `
   };
   
@@ -86,22 +125,67 @@ async function sendAutoReplyToUser(email, firstName, message) {
   if (!emailTransporter) return;
   
   const mailOptions = {
-    from: process.env.EMAIL_USER,
+    from: `"Sound & Silence Team" <${process.env.EMAIL_USER}>`,
     to: email,
-    subject: 'Thank you for contacting Sound & Silence',
+    subject: '✨ Thank you for contacting Sound & Silence',
     html: `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 10px;">
-        <div style="text-align: center;">
-          <h2 style="color: #8b5cf6;">Thank you, ${firstName}!</h2>
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Thank You for Contacting Sound & Silence</title>
+        <style>
+          body { font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; color: #333; }
+          .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+          .header { background: linear-gradient(135deg, #8b5cf6, #ec4899); padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }
+          .header h1 { color: white; margin: 0; font-size: 24px; }
+          .content { background: #f9fafb; padding: 30px; border-radius: 0 0 10px 10px; border: 1px solid #e5e7eb; border-top: none; }
+          .greeting { font-size: 18px; margin-bottom: 20px; }
+          .message-preview { background: white; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #8b5cf6; }
+          .button { display: inline-block; background: #8b5cf6; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; margin-top: 15px; }
+          .footer { text-align: center; padding: 20px; font-size: 12px; color: #6b7280; border-top: 1px solid #e5e7eb; margin-top: 20px; }
+          .social-links { margin-top: 15px; }
+          .social-links a { color: #8b5cf6; text-decoration: none; margin: 0 10px; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <h1>🎵 Sound & Silence</h1>
+            <p style="color: rgba(255,255,255,0.9); margin: 5px 0 0;">We've received your message</p>
+          </div>
+          <div class="content">
+            <div class="greeting">
+              <p>Dear ${firstName},</p>
+              <p>Thank you for reaching out to <strong>Sound & Silence</strong>. We truly appreciate you taking the time to connect with us.</p>
+            </div>
+            <p>This email confirms that we have received your message. Our team will review it and get back to you within <strong>24 hours</strong>.</p>
+            <div class="message-preview">
+              <p style="font-weight: bold; margin-bottom: 10px;">📝 Your message:</p>
+              <p style="color: #4b5563;">"${message.substring(0, 200)}${message.length > 200 ? '...' : ''}"</p>
+            </div>
+            <p>In the meantime, here are some helpful resources:</p>
+            <ul>
+              <li>📅 <a href="https://soundandsilence.web.app/events" style="color: #8b5cf6;">Upcoming Events</a> - Join our sober social gatherings</li>
+              <li>👥 <a href="https://soundandsilence.web.app/community" style="color: #8b5cf6;">Community Blog</a> - Read stories from our members</li>
+              <li>🤝 <a href="https://soundandsilence.web.app/support/volunteer" style="color: #8b5cf6;">Get Involved</a> - Volunteer, partner, or donate</li>
+            </ul>
+            <div style="text-align: center;">
+              <a href="https://soundandsilence.web.app" class="button">Visit Our Website</a>
+            </div>
+          </div>
+          <div class="footer">
+            <p>Sound & Silence — Science-based sober events in East London</p>
+            <div class="social-links">
+              <a href="#">Instagram</a> • <a href="#">Twitter</a> • <a href="#">TikTok</a>
+            </div>
+            <p>© ${new Date().getFullYear()} Sound & Silence. All rights reserved.</p>
+            <p style="font-size: 11px;">You received this email because you contacted us through our website.</p>
+          </div>
         </div>
-        <p>We've received your message and our team will get back to you within 24 hours.</p>
-        <div style="background: #f9fafb; padding: 15px; border-radius: 8px; margin: 15px 0;">
-          <p style="margin: 5px 0;"><strong>Your message:</strong></p>
-          <p style="margin: 10px 0 0 0;">${message.substring(0, 200)}${message.length > 200 ? '...' : ''}</p>
-        </div>
-        <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;">
-        <p style="color: #6b7280; font-size: 12px;">Sound & Silence - Science-based sober events in East London</p>
-      </div>
+      </body>
+      </html>
     `
   };
   
@@ -118,22 +202,72 @@ async function sendSupportTicketEmailToAdmin(data) {
   if (!emailTransporter) return;
   
   const { name, email, message } = data;
+  const ticketId = 'TKT-' + Date.now().toString().slice(-8);
+  const currentDate = new Date().toLocaleString('en-GB', { timeZone: 'Europe/London' });
   
   const mailOptions = {
-    from: process.env.EMAIL_USER,
+    from: `"${name} via Sound & Silence Support" <${process.env.EMAIL_USER}>`,
+    replyTo: email,
     to: process.env.ADMIN_EMAIL || process.env.EMAIL_USER,
-    subject: `🎫 New Support Ticket from ${name}`,
+    subject: `🎫 New Support Ticket #${ticketId} from ${name}`,
     html: `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 10px;">
-        <h2 style="color: #8b5cf6;">New Support Ticket</h2>
-        <div style="background: #f9fafb; padding: 15px; border-radius: 8px; margin: 15px 0;">
-          <p style="margin: 5px 0;"><strong>Name:</strong> ${name}</p>
-          <p style="margin: 5px 0;"><strong>Email:</strong> <a href="mailto:${email}">${email}</a></p>
-          <p style="margin: 5px 0;"><strong>Message:</strong></p>
-          <p style="margin: 10px 0 0 0; white-space: pre-wrap;">${message}</p>
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>New Support Ticket</title>
+        <style>
+          body { font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; color: #333; }
+          .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+          .header { background: linear-gradient(135deg, #8b5cf6, #ec4899); padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }
+          .header h1 { color: white; margin: 0; font-size: 24px; }
+          .content { background: #f9fafb; padding: 30px; border-radius: 0 0 10px 10px; border: 1px solid #e5e7eb; border-top: none; }
+          .ticket-box { background: white; padding: 20px; border-radius: 8px; margin: 15px 0; border-left: 4px solid #ef4444; }
+          .label { font-weight: bold; color: #4b5563; margin-bottom: 5px; }
+          .value { color: #1f2937; margin-bottom: 15px; }
+          .priority-high { background: #fee2e2; padding: 5px 10px; border-radius: 5px; display: inline-block; font-size: 12px; color: #dc2626; }
+          .footer { text-align: center; padding: 20px; font-size: 12px; color: #6b7280; border-top: 1px solid #e5e7eb; margin-top: 20px; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <h1>🎵 Sound & Silence</h1>
+            <p style="color: rgba(255,255,255,0.9); margin: 5px 0 0;">New Support Ticket</p>
+          </div>
+          <div class="content">
+            <div class="ticket-box">
+              <div style="display: flex; justify-content: space-between; margin-bottom: 15px;">
+                <span class="label">🎫 Ticket #:</span>
+                <span class="value" style="font-family: monospace;">${ticketId}</span>
+              </div>
+              <div style="display: flex; justify-content: space-between; margin-bottom: 15px;">
+                <span class="label">📅 Date:</span>
+                <span class="value">${currentDate}</span>
+              </div>
+              <div style="display: flex; justify-content: space-between; margin-bottom: 15px;">
+                <span class="label">⚠️ Priority:</span>
+                <span class="priority-high">Normal</span>
+              </div>
+              <div class="label">👤 From:</div>
+              <div class="value">${name}</div>
+              <div class="label">📧 Email:</div>
+              <div class="value"><a href="mailto:${email}" style="color: #8b5cf6;">${email}</a></div>
+              <div class="label">💬 Message:</div>
+              <div class="value" style="background: #f3f4f6; padding: 12px; border-radius: 6px; margin-top: 5px;">${message.replace(/\n/g, '<br>')}</div>
+            </div>
+            <div style="background: #e0e7ff; padding: 12px; border-radius: 6px; text-align: center;">
+              <p style="margin: 0; font-size: 14px;">💡 Reply to this email to respond to ${name}</p>
+            </div>
+          </div>
+          <div class="footer">
+            <p>Manage tickets in the <a href="https://soundandsilence.web.app/admin" style="color: #8b5cf6;">Admin Dashboard</a></p>
+            <p>© ${new Date().getFullYear()} Sound & Silence. All rights reserved.</p>
+          </div>
         </div>
-        <p style="color: #6b7280; font-size: 12px;">View this ticket in the admin dashboard.</p>
-      </div>
+      </body>
+      </html>
     `
   };
   
@@ -150,30 +284,85 @@ async function sendSupportInquiryEmailToAdmin(data) {
   if (!emailTransporter) return;
   
   const { firstName, lastName, email, phone, message, supportType, organization, donationAmount } = data;
+  const currentDate = new Date().toLocaleString('en-GB', { timeZone: 'Europe/London' });
+  
+  const typeColors = {
+    volunteer: '#8b5cf6',
+    partner: '#ec4899',
+    donate: '#10b981'
+  };
+  const color = typeColors[supportType] || '#8b5cf6';
   
   const subject = `🤝 New ${supportType.charAt(0).toUpperCase() + supportType.slice(1)} Inquiry from ${firstName} ${lastName}`;
   
   let detailsHtml = '';
-  if (organization) detailsHtml += `<p style="margin: 5px 0;"><strong>Organization:</strong> ${organization}</p>`;
-  if (phone) detailsHtml += `<p style="margin: 5px 0;"><strong>Phone:</strong> ${phone}</p>`;
-  if (donationAmount) detailsHtml += `<p style="margin: 5px 0;"><strong>Donation Amount:</strong> ${donationAmount}</p>`;
+  if (organization) detailsHtml += `<div style="display: flex; justify-content: space-between; margin-bottom: 12px;"><span class="label">🏢 Organization:</span><span class="value">${organization}</span></div>`;
+  if (phone) detailsHtml += `<div style="display: flex; justify-content: space-between; margin-bottom: 12px;"><span class="label">📞 Phone:</span><span class="value">${phone}</span></div>`;
+  if (donationAmount) detailsHtml += `<div style="display: flex; justify-content: space-between; margin-bottom: 12px;"><span class="label">💰 Donation Amount:</span><span class="value">${donationAmount}</span></div>`;
   
   const mailOptions = {
-    from: process.env.EMAIL_USER,
+    from: `"${firstName} ${lastName} via Sound & Silence" <${process.env.EMAIL_USER}>`,
+    replyTo: email,
     to: process.env.ADMIN_EMAIL || process.env.EMAIL_USER,
     subject: subject,
     html: `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 10px;">
-        <h2 style="color: #8b5cf6;">New ${supportType.toUpperCase()} Inquiry</h2>
-        <div style="background: #f9fafb; padding: 15px; border-radius: 8px; margin: 15px 0;">
-          <p style="margin: 5px 0;"><strong>Name:</strong> ${firstName} ${lastName}</p>
-          <p style="margin: 5px 0;"><strong>Email:</strong> <a href="mailto:${email}">${email}</a></p>
-          ${detailsHtml}
-          <p style="margin: 5px 0;"><strong>Message:</strong></p>
-          <p style="margin: 10px 0 0 0; white-space: pre-wrap;">${message || 'No additional message provided.'}</p>
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>New Support Inquiry</title>
+        <style>
+          body { font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; color: #333; }
+          .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+          .header { background: linear-gradient(135deg, ${color}, ${color}dd); padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }
+          .header h1 { color: white; margin: 0; font-size: 24px; }
+          .content { background: #f9fafb; padding: 30px; border-radius: 0 0 10px 10px; border: 1px solid #e5e7eb; border-top: none; }
+          .inquiry-box { background: white; padding: 20px; border-radius: 8px; margin: 15px 0; border-left: 4px solid ${color}; }
+          .label { font-weight: bold; color: #4b5563; margin-bottom: 5px; }
+          .value { color: #1f2937; margin-bottom: 12px; }
+          .footer { text-align: center; padding: 20px; font-size: 12px; color: #6b7280; border-top: 1px solid #e5e7eb; margin-top: 20px; }
+          .badge { display: inline-block; background: ${color}20; color: ${color}; padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: bold; margin-bottom: 15px; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <h1>🎵 Sound & Silence</h1>
+            <p style="color: rgba(255,255,255,0.9); margin: 5px 0 0;">New ${supportType.charAt(0).toUpperCase() + supportType.slice(1)} Inquiry</p>
+          </div>
+          <div class="content">
+            <div class="inquiry-box">
+              <div style="text-align: center;">
+                <span class="badge">${supportType.toUpperCase()}</span>
+              </div>
+              <div style="display: flex; justify-content: space-between; margin-bottom: 12px;">
+                <span class="label">📅 Date:</span>
+                <span class="value">${currentDate}</span>
+              </div>
+              <div style="display: flex; justify-content: space-between; margin-bottom: 12px;">
+                <span class="label">👤 Name:</span>
+                <span class="value">${firstName} ${lastName}</span>
+              </div>
+              <div style="display: flex; justify-content: space-between; margin-bottom: 12px;">
+                <span class="label">📧 Email:</span>
+                <span class="value"><a href="mailto:${email}" style="color: ${color};">${email}</a></span>
+              </div>
+              ${detailsHtml}
+              <div class="label">💬 Message:</div>
+              <div class="value" style="background: #f3f4f6; padding: 12px; border-radius: 6px; margin-top: 5px;">${message || 'No additional message provided.'}</div>
+            </div>
+            <div style="background: #e0e7ff; padding: 12px; border-radius: 6px; text-align: center;">
+              <p style="margin: 0; font-size: 14px;">💡 Reply to this email to respond to ${firstName}</p>
+            </div>
+          </div>
+          <div class="footer">
+            <p>Sound & Silence — Science-based sober events in East London</p>
+            <p>© ${new Date().getFullYear()} Sound & Silence. All rights reserved.</p>
+          </div>
         </div>
-        <p style="color: #6b7280; font-size: 12px;">Follow up with this person to continue the conversation.</p>
-      </div>
+      </body>
+      </html>
     `
   };
   
