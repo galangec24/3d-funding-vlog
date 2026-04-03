@@ -979,6 +979,7 @@ app.get('/api/users/stats/age', async (req, res) => {
 
 app.get('/api/users/count', async (req, res) => {
   if (!supabase) {
+    console.log('Supabase not configured, returning count: 0');
     return res.json({ success: true, count: 0 });
   }
   
@@ -990,11 +991,11 @@ app.get('/api/users/count', async (req, res) => {
     
     if (error) throw error;
     
-    console.log(`Total users count: ${count || 0}`);
-    // Return count directly, not wrapped in user object
+    console.log(`✅ Total users count: ${count || 0}`);
+    // Return count directly
     res.json({ success: true, count: count || 0 });
   } catch (error) {
-    console.error('Error fetching user count:', error);
+    console.error('❌ Error fetching user count:', error);
     res.status(500).json({ success: false, error: error.message, count: 0 });
   }
 });
