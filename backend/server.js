@@ -863,22 +863,7 @@ app.get('/api/auth/me', async (req, res) => {
   }
 });
 
-// Get user profile by ID
-app.get('/api/users/:id', async (req, res) => {
-  const { id } = req.params;
-  if (!supabase) return res.json({ success: false, user: null });
-  
-  try {
-    const { data: user } = await supabase
-      .from('app_users')
-      .select('id, name, nickname, location, bio, hobbies, music_genres, birth_date')
-      .eq('id', id)
-      .single();
-    res.json({ success: true, user });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
+
 
 // Update user profile
 app.put('/api/users/:id', async (req, res) => {
@@ -911,6 +896,30 @@ app.put('/api/users/:id', async (req, res) => {
 });
 
 // ==================== USER STATISTICS ====================
+
+app.get('/api/users/count', async (req, res) => {
+  if (!supabase) {
+    console.log('Supabase not configured, returning count: 0');
+    return res.json({ success: true, count: 0 });
+  }
+  
+  try {
+    // Count all users in app_users table
+    const { count, error } = await supabase
+      .from('app_users')
+      .select('*', { count: 'exact', head: true });
+    
+    if (error) throw error;
+    
+    console.log(`✅ Total users count: ${count || 0}`);
+    // Return count directly
+    res.json({ success: true, count: count || 0 });
+  } catch (error) {
+    console.error('❌ Error fetching user count:', error);
+    res.status(500).json({ success: false, error: error.message, count: 0 });
+  }
+});
+
 
 app.get('/api/users/stats/age', async (req, res) => {
   if (!supabase) {
@@ -977,28 +986,22 @@ app.get('/api/users/stats/age', async (req, res) => {
   }
 });
 
-app.get('/api/users/count', async (req, res) => {
-  if (!supabase) {
-    console.log('Supabase not configured, returning count: 0');
-    return res.json({ success: true, count: 0 });
-  }
+app.get('/api/users/:id', async (req, res) => {
+  const { id } = req.params;
+  if (!supabase) return res.json({ success: false, user: null });
   
   try {
-    // Count all users in app_users table
-    const { count, error } = await supabase
+    const { data: user } = await supabase
       .from('app_users')
-      .select('*', { count: 'exact', head: true });
-    
-    if (error) throw error;
-    
-    console.log(`✅ Total users count: ${count || 0}`);
-    // Return count directly
-    res.json({ success: true, count: count || 0 });
+      .select('id, name, nickname, location, bio, hobbies, music_genres, birth_date')
+      .eq('id', id)
+      .single();
+    res.json({ success: true, user });
   } catch (error) {
-    console.error('❌ Error fetching user count:', error);
-    res.status(500).json({ success: false, error: error.message, count: 0 });
+    res.status(500).json({ success: false, error: error.message });
   }
 });
+
 
 // ==================== ONLINE USERS ====================
 
