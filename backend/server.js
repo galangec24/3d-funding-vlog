@@ -3,6 +3,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import { createClient } from '@supabase/supabase-js';
 import rateLimit from 'express-rate-limit';
+import nodemailer from 'nodemailer';
 
 dotenv.config();
 
@@ -19,6 +20,170 @@ app.use(express.json());
 // Cloudflare Turnstile Configuration
 const CLOUDFLARE_SECRET_KEY = process.env.CLOUDFLARE_SECRET_KEY || '';
 const CLOUDFLARE_SITE_KEY = process.env.CLOUDFLARE_SITE_KEY || '';
+
+// Email Configuration
+let emailTransporter = null;
+
+// Configure email transporter
+try {
+  if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
+    emailTransporter = nodemailer.createTransport({
+      service: 'gmail',
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS
+      }
+    });
+    console.log('✅ Email service configured');
+  } else {
+    console.log('⚠️ Email credentials not set - email features disabled');
+  }
+} catch (error) {
+  console.log('⚠️ Email service not configured:', error.message);
+}
+
+// ==================== EMAIL FUNCTIONS ====================
+
+// Send contact form email to admin
+async function sendContactEmailToAdmin(data) {
+  if (!emailTransporter) {
+    console.log('📧 Email not configured. Would have sent:', data);
+    return;
+  }
+  
+  const { firstName, lastName, email, message, supportType } = data;
+  
+  const mailOptions = {
+    from: process.env.EMAIL_USER,
+    to: process.env.ADMIN_EMAIL || process.env.EMAIL_USER,
+    subject: `📧 New Contact Message from ${firstName} ${lastName}`,
+    html: `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 10px;">
+        <h2 style="color: #8b5cf6;">New Contact Form Submission</h2>
+        <div style="background: #f9fafb; padding: 15px; border-radius: 8px; margin: 15px 0;">
+          <p style="margin: 5px 0;"><strong>Name:</strong> ${firstName} ${lastName}</p>
+          <p style="margin: 5px 0;"><strong>Email:</strong> <a href="mailto:${email}">${email}</a></p>
+          ${supportType ? `<p style="margin: 5px 0;"><strong>Inquiry Type:</strong> ${supportType}</p>` : ''}
+          <p style="margin: 5px 0;"><strong>Message:</strong></p>
+          <p style="margin: 10px 0 0 0; white-space: pre-wrap;">${message}</p>
+        </div>
+        <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;">
+        <p style="color: #6b7280; font-size: 12px;">Reply directly to this email to respond to ${firstName}.</p>
+      </div>
+    `
+  };
+  
+  try {
+    await emailTransporter.sendMail(mailOptions);
+    console.log('✅ Admin email sent for contact form');
+  } catch (error) {
+    console.error('❌ Failed to send admin email:', error);
+  }
+}
+
+// Send auto-reply to user
+async function sendAutoReplyToUser(email, firstName, message) {
+  if (!emailTransporter) return;
+  
+  const mailOptions = {
+    from: process.env.EMAIL_USER,
+    to: email,
+    subject: 'Thank you for contacting Sound & Silence',
+    html: `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 10px;">
+        <div style="text-align: center;">
+          <h2 style="color: #8b5cf6;">Thank you, ${firstName}!</h2>
+        </div>
+        <p>We've received your message and our team will get back to you within 24 hours.</p>
+        <div style="background: #f9fafb; padding: 15px; border-radius: 8px; margin: 15px 0;">
+          <p style="margin: 5px 0;"><strong>Your message:</strong></p>
+          <p style="margin: 10px 0 0 0;">${message.substring(0, 200)}${message.length > 200 ? '...' : ''}</p>
+        </div>
+        <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;">
+        <p style="color: #6b7280; font-size: 12px;">Sound & Silence - Science-based sober events in East London</p>
+      </div>
+    `
+  };
+  
+  try {
+    await emailTransporter.sendMail(mailOptions);
+    console.log('✅ Auto-reply sent to user');
+  } catch (error) {
+    console.error('❌ Failed to send auto-reply:', error);
+  }
+}
+
+// Send support ticket email to admin
+async function sendSupportTicketEmailToAdmin(data) {
+  if (!emailTransporter) return;
+  
+  const { name, email, message } = data;
+  
+  const mailOptions = {
+    from: process.env.EMAIL_USER,
+    to: process.env.ADMIN_EMAIL || process.env.EMAIL_USER,
+    subject: `🎫 New Support Ticket from ${name}`,
+    html: `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 10px;">
+        <h2 style="color: #8b5cf6;">New Support Ticket</h2>
+        <div style="background: #f9fafb; padding: 15px; border-radius: 8px; margin: 15px 0;">
+          <p style="margin: 5px 0;"><strong>Name:</strong> ${name}</p>
+          <p style="margin: 5px 0;"><strong>Email:</strong> <a href="mailto:${email}">${email}</a></p>
+          <p style="margin: 5px 0;"><strong>Message:</strong></p>
+          <p style="margin: 10px 0 0 0; white-space: pre-wrap;">${message}</p>
+        </div>
+        <p style="color: #6b7280; font-size: 12px;">View this ticket in the admin dashboard.</p>
+      </div>
+    `
+  };
+  
+  try {
+    await emailTransporter.sendMail(mailOptions);
+    console.log('✅ Support ticket email sent to admin');
+  } catch (error) {
+    console.error('❌ Failed to send support ticket email:', error);
+  }
+}
+
+// Send support inquiry email (volunteer/partner/donate)
+async function sendSupportInquiryEmailToAdmin(data) {
+  if (!emailTransporter) return;
+  
+  const { firstName, lastName, email, phone, message, supportType, organization, donationAmount } = data;
+  
+  const subject = `🤝 New ${supportType.charAt(0).toUpperCase() + supportType.slice(1)} Inquiry from ${firstName} ${lastName}`;
+  
+  let detailsHtml = '';
+  if (organization) detailsHtml += `<p style="margin: 5px 0;"><strong>Organization:</strong> ${organization}</p>`;
+  if (phone) detailsHtml += `<p style="margin: 5px 0;"><strong>Phone:</strong> ${phone}</p>`;
+  if (donationAmount) detailsHtml += `<p style="margin: 5px 0;"><strong>Donation Amount:</strong> ${donationAmount}</p>`;
+  
+  const mailOptions = {
+    from: process.env.EMAIL_USER,
+    to: process.env.ADMIN_EMAIL || process.env.EMAIL_USER,
+    subject: subject,
+    html: `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 10px;">
+        <h2 style="color: #8b5cf6;">New ${supportType.toUpperCase()} Inquiry</h2>
+        <div style="background: #f9fafb; padding: 15px; border-radius: 8px; margin: 15px 0;">
+          <p style="margin: 5px 0;"><strong>Name:</strong> ${firstName} ${lastName}</p>
+          <p style="margin: 5px 0;"><strong>Email:</strong> <a href="mailto:${email}">${email}</a></p>
+          ${detailsHtml}
+          <p style="margin: 5px 0;"><strong>Message:</strong></p>
+          <p style="margin: 10px 0 0 0; white-space: pre-wrap;">${message || 'No additional message provided.'}</p>
+        </div>
+        <p style="color: #6b7280; font-size: 12px;">Follow up with this person to continue the conversation.</p>
+      </div>
+    `
+  };
+  
+  try {
+    await emailTransporter.sendMail(mailOptions);
+    console.log(`✅ ${supportType} inquiry email sent to admin`);
+  } catch (error) {
+    console.error(`❌ Failed to send ${supportType} inquiry email:`, error);
+  }
+}
 
 // Turnstile verification function
 async function verifyTurnstile(token) {
@@ -114,8 +279,196 @@ app.get('/api/health', (req, res) => {
     uptime: process.uptime(),
     environment: process.env.NODE_ENV || 'development',
     supabase: supabase ? 'connected' : 'not configured',
-    turnstile: CLOUDFLARE_SITE_KEY ? 'configured' : 'not configured'
+    turnstile: CLOUDFLARE_SITE_KEY ? 'configured' : 'not configured',
+    email: emailTransporter ? 'configured' : 'not configured'
   });
+});
+
+// ==================== CONTACT FORM ====================
+
+app.post('/api/contact', async (req, res) => {
+  const { firstName, lastName, email, message, turnstile_token, supportType } = req.body;
+  
+  if (!turnstile_token) {
+    return res.status(400).json({ success: false, error: 'Verification required' });
+  }
+  
+  const isHuman = await verifyTurnstile(turnstile_token);
+  if (!isHuman) {
+    return res.status(400).json({ success: false, error: 'Verification failed' });
+  }
+  
+  if (!firstName || !lastName || !email || !message) {
+    return res.status(400).json({ success: false, error: 'All fields required' });
+  }
+  
+  // Send email to admin
+  await sendContactEmailToAdmin({ firstName, lastName, email, message, supportType });
+  
+  // Send auto-reply to user
+  await sendAutoReplyToUser(email, firstName, message);
+  
+  // Save to database
+  if (supabase) {
+    try {
+      const { error } = await supabase
+        .from('contact_messages')
+        .insert([{
+          first_name: firstName.trim(),
+          last_name: lastName.trim(),
+          email: email.trim().toLowerCase(),
+          message: message.trim(),
+          support_type: supportType || null,
+          status: 'unread',
+          created_at: new Date().toISOString()
+        }]);
+      
+      if (error) throw error;
+    } catch (error) {
+      console.error('Error saving contact message:', error);
+    }
+  }
+  
+  res.json({ success: true, message: 'Message sent successfully! We\'ll get back to you soon.' });
+});
+
+app.get('/api/contact/messages', async (req, res) => {
+  if (!supabase) {
+    return res.json({ success: true, messages: [] });
+  }
+  
+  try {
+    const { data, error } = await supabase
+      .from('contact_messages')
+      .select('*')
+      .order('created_at', { ascending: false });
+    
+    if (error) throw error;
+    res.json({ success: true, messages: data || [] });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ==================== SUPPORT TICKETS ====================
+
+app.get('/api/support-tickets', async (req, res) => {
+  if (!supabase) return res.json({ success: true, tickets: [] });
+  try {
+    const { data, error } = await supabase.from('support_tickets').select('*').order('created_at', { ascending: false });
+    if (error) throw error;
+    res.json({ success: true, tickets: data || [] });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/support-tickets', strictLimiter, async (req, res) => {
+  const { name, email, message, turnstile_token } = req.body;
+  
+  if (!turnstile_token) {
+    return res.status(400).json({ success: false, error: 'Verification required' });
+  }
+  
+  const isHuman = await verifyTurnstile(turnstile_token);
+  if (!isHuman) {
+    return res.status(400).json({ success: false, error: 'Verification failed' });
+  }
+  
+  if (!name || !email || !message) {
+    return res.status(400).json({ success: false, error: 'All fields required' });
+  }
+  
+  // Send email notification to admin
+  await sendSupportTicketEmailToAdmin({ name, email, message });
+  
+  if (!supabase) {
+    return res.json({ success: true, ticket: { id: Date.now() } });
+  }
+  
+  try {
+    const { data, error } = await supabase
+      .from('support_tickets')
+      .insert([{ 
+        name: name.trim(), 
+        email: email.trim().toLowerCase(), 
+        message: message.trim(), 
+        status: 'open', 
+        created_at: new Date().toISOString() 
+      }])
+      .select();
+    
+    if (error) throw error;
+    res.json({ success: true, ticket: data[0] });
+  } catch (error) {
+    console.error('Error creating ticket:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.put('/api/support-tickets/:id', async (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body;
+  if (!supabase) return res.json({ success: true });
+  try {
+    await supabase.from('support_tickets').update({ status, updated_at: new Date().toISOString() }).eq('id', id);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ==================== SUPPORT US (Volunteer/Partner/Donate) ====================
+
+app.post('/api/support-us', async (req, res) => {
+  const { firstName, lastName, email, phone, message, interests, availability, organization, donationAmount, supportType, turnstile_token } = req.body;
+  
+  if (!turnstile_token) {
+    return res.status(400).json({ success: false, error: 'Verification required' });
+  }
+  
+  const isHuman = await verifyTurnstile(turnstile_token);
+  if (!isHuman) {
+    return res.status(400).json({ success: false, error: 'Verification failed' });
+  }
+  
+  if (!firstName || !lastName || !email) {
+    return res.status(400).json({ success: false, error: 'Name and email required' });
+  }
+  
+  // Send email notification to admin
+  await sendSupportInquiryEmailToAdmin({
+    firstName, lastName, email, phone, message, supportType, organization, donationAmount
+  });
+  
+  if (!supabase) {
+    return res.json({ success: true });
+  }
+  
+  try {
+    const { error } = await supabase
+      .from('support_inquiries')
+      .insert([{
+        first_name: firstName.trim(),
+        last_name: lastName.trim(),
+        email: email.trim().toLowerCase(),
+        phone: phone || null,
+        message: message || null,
+        interests: interests || [],
+        availability: availability || null,
+        organization: organization || null,
+        donation_amount: donationAmount || null,
+        support_type: supportType,
+        status: 'pending',
+        created_at: new Date().toISOString()
+      }]);
+    
+    if (error) throw error;
+    res.json({ success: true, message: 'Thank you for your support! We will contact you soon.' });
+  } catch (error) {
+    console.error('Error saving support inquiry:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
 // ==================== USER AUTHENTICATION ====================
@@ -183,7 +536,6 @@ app.put('/api/users/:id', async (req, res) => {
 
 // ==================== USER STATISTICS ====================
 
-// Get user age statistics
 app.get('/api/users/stats/age', async (req, res) => {
   if (!supabase) {
     return res.json({ 
@@ -206,11 +558,7 @@ app.get('/api/users/stats/age', async (req, res) => {
     const totalUsers = users?.length || 0;
     
     let ageGroups = {
-      child: 0,      // 0-12
-      teenager: 0,   // 13-19
-      youngAdult: 0, // 20-35
-      adult: 0,      // 36-59
-      senior: 0      // 60+
+      child: 0, teenager: 0, youngAdult: 0, adult: 0, senior: 0
     };
     
     const ages = [];
@@ -253,7 +601,6 @@ app.get('/api/users/stats/age', async (req, res) => {
   }
 });
 
-// Get total registered users count
 app.get('/api/users/count', async (req, res) => {
   if (!supabase) {
     return res.json({ success: true, count: 0 });
@@ -265,7 +612,6 @@ app.get('/api/users/count', async (req, res) => {
       .select('*', { count: 'exact', head: true });
     
     if (error) throw error;
-    
     res.json({ success: true, count: count || 0 });
   } catch (error) {
     console.error('Error fetching user count:', error);
@@ -282,43 +628,18 @@ app.post('/api/online/track', async (req, res) => {
     return res.status(400).json({ success: false, error: 'Session ID required' });
   }
   
-  // Only track authenticated users
   let authenticatedUserId = null;
   let isAuthenticated = false;
-  let userEmail = null;
-  let userDisplayName = null;
   
   if (auth_token && supabase) {
     try {
-      // Decode the auth token to get user ID
-      const decoded = Buffer.from(auth_token, 'base64').toString();
-      const userId = parseInt(decoded.split(':')[0]);
-      
-      const { data: user, error } = await supabase
-        .from('app_users')
-        .select('id, name, email')
-        .eq('id', userId)
-        .single();
-        
-      if (user && !error) {
+      const userId = parseInt(Buffer.from(auth_token, 'base64').toString().split(':')[0]);
+      const { data: user } = await supabase.from('app_users').select('id, name').eq('id', userId).single();
+      if (user) {
         authenticatedUserId = user.id;
         isAuthenticated = true;
-        userEmail = user.email;
-        userDisplayName = user.name || user.email.split('@')[0];
       }
-    } catch (e) {
-      console.log('Auth token decode error:', e);
-    }
-  }
-  
-  // Only proceed if user is authenticated
-  if (!isAuthenticated) {
-    return res.json({ 
-      success: true, 
-      onlineCount: 0, 
-      users: [],
-      message: 'Anonymous users not tracked'
-    });
+    } catch (e) {}
   }
   
   if (!supabase) {
@@ -329,196 +650,66 @@ app.post('/api/online/track', async (req, res) => {
     const now = new Date().toISOString();
     const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
     
-    // Clean up old sessions (older than 5 minutes)
-    await supabase
-      .from('online_users')
-      .delete()
-      .lt('last_seen', fiveMinutesAgo);
+    await supabase.from('online_users').delete().lt('last_seen', fiveMinutesAgo);
     
-    // Check if session exists for this user
-    const { data: existing, error: findError } = await supabase
-      .from('online_users')
-      .select('id')
-      .eq('user_id', authenticatedUserId)
-      .maybeSingle();
+    const { data: existing } = await supabase.from('online_users').select('id').eq('session_id', session_id).maybeSingle();
     
     if (existing) {
-      // Update existing session
-      await supabase
-        .from('online_users')
-        .update({ 
-          last_seen: now,
-          current_page: current_page || null,
-          session_id: session_id,
-          user_agent: user_agent || null
-        })
-        .eq('user_id', authenticatedUserId);
+      await supabase.from('online_users').update({ 
+        last_seen: now, 
+        current_page: current_page || null, 
+        user_name: user_name || 'Guest', 
+        user_id: authenticatedUserId, 
+        is_authenticated: isAuthenticated 
+      }).eq('session_id', session_id);
     } else {
-      // Create new session for authenticated user only
-      await supabase
-        .from('online_users')
-        .insert([{ 
-          session_id: session_id,
-          user_id: authenticatedUserId,
-          user_name: userDisplayName || 'User',
-          is_authenticated: true,
-          current_page: current_page || null,
-          user_agent: user_agent || null,
-          last_seen: now,
-          created_at: now
-        }]);
+      await supabase.from('online_users').insert([{ 
+        session_id, 
+        user_name: user_name || 'Guest', 
+        user_id: authenticatedUserId, 
+        is_authenticated: isAuthenticated, 
+        current_page: current_page || null, 
+        user_agent: user_agent || null, 
+        last_seen: now 
+      }]);
     }
     
-    // Get all authenticated online users (not guests)
-    const { data: onlineUsers, error: usersError } = await supabase
-      .from('online_users')
-      .select(`
-        id,
-        user_id,
-        user_name,
-        current_page,
-        last_seen,
-        app_users (email, name, avatar_url)
-      `)
-      .eq('is_authenticated', true)
-      .gte('last_seen', fiveMinutesAgo)
-      .order('last_seen', { ascending: false });
-    
-    if (usersError) throw usersError;
-    
-    // Format the response
-    const formattedUsers = (onlineUsers || []).map(user => ({
-      id: user.user_id,
-      name: user.user_name,
-      email: user.app_users?.email,
-      avatar: user.app_users?.avatar_url,
-      current_page: user.current_page,
-      last_seen: user.last_seen
-    }));
+    const { count: totalCount } = await supabase.from('online_users').select('*', { count: 'exact', head: true }).gte('last_seen', fiveMinutesAgo);
+    const { data: authenticatedUsers } = await supabase.from('online_users').select('user_name, user_id, current_page, last_seen').eq('is_authenticated', true).gte('last_seen', fiveMinutesAgo).order('last_seen', { ascending: false });
+    const { data: guestUsers } = await supabase.from('online_users').select('user_name, current_page, last_seen').eq('is_authenticated', false).gte('last_seen', fiveMinutesAgo).order('last_seen', { ascending: false }).limit(10);
     
     res.json({ 
       success: true, 
-      onlineCount: formattedUsers.length,
-      users: formattedUsers
+      onlineCount: totalCount || 0, 
+      authenticatedCount: authenticatedUsers?.length || 0, 
+      users: [...(authenticatedUsers || []), ...(guestUsers || [])] 
     });
-    
   } catch (error) {
-    console.error('Error tracking online user:', error);
+    console.error('Error tracking user:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
 app.get('/api/online/count', async (req, res) => {
-  if (!supabase) {
-    return res.json({ success: true, onlineCount: 0, users: [] });
-  }
+  if (!supabase) return res.json({ success: true, onlineCount: 0, users: [] });
   
   try {
     const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+    await supabase.from('online_users').delete().lt('last_seen', fiveMinutesAgo);
+    const { count } = await supabase.from('online_users').select('*', { count: 'exact', head: true }).gte('last_seen', fiveMinutesAgo);
+    const { data: users } = await supabase.from('online_users').select('user_name, current_page, last_seen, is_authenticated').gte('last_seen', fiveMinutesAgo).order('last_seen', { ascending: false });
     
-    // Clean up old sessions
-    await supabase
-      .from('online_users')
-      .delete()
-      .lt('last_seen', fiveMinutesAgo);
+    const uniqueUsers = [];
+    const seenSessions = new Set();
+    for (const user of users) {
+      const key = `${user.user_name}_${user.current_page}`;
+      if (!seenSessions.has(key)) {
+        seenSessions.add(key);
+        uniqueUsers.push(user);
+      }
+    }
     
-    // Get only authenticated online users
-    const { data: onlineUsers, error: usersError } = await supabase
-      .from('online_users')
-      .select(`
-        id,
-        user_id,
-        user_name,
-        current_page,
-        last_seen,
-        app_users (email, name, avatar_url)
-      `)
-      .eq('is_authenticated', true)
-      .gte('last_seen', fiveMinutesAgo)
-      .order('last_seen', { ascending: false });
-    
-    if (usersError) throw usersError;
-    
-    const formattedUsers = (onlineUsers || []).map(user => ({
-      id: user.user_id,
-      name: user.user_name,
-      email: user.app_users?.email,
-      avatar: user.app_users?.avatar_url,
-      current_page: user.current_page,
-      last_seen: user.last_seen
-    }));
-    
-    res.json({ 
-      success: true, 
-      onlineCount: formattedUsers.length,
-      users: formattedUsers
-    });
-    
-  } catch (error) {
-    console.error('Error getting online count:', error);
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-app.post('/api/online/offline', async (req, res) => {
-  const { user_id } = req.body;
-  
-  if (!user_id || !supabase) {
-    return res.json({ success: true });
-  }
-  
-  try {
-    // Remove user from online users
-    await supabase
-      .from('online_users')
-      .delete()
-      .eq('user_id', user_id);
-    
-    res.json({ success: true });
-  } catch (error) {
-    console.error('Error marking user offline:', error);
-    res.json({ success: false });
-  }
-});
-
-// ==================== SUPPORT TICKETS ====================
-
-app.get('/api/support-tickets', async (req, res) => {
-  if (!supabase) return res.json({ success: true, tickets: [] });
-  try {
-    const { data, error } = await supabase.from('support_tickets').select('*').order('created_at', { ascending: false });
-    if (error) throw error;
-    res.json({ success: true, tickets: data || [] });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-app.post('/api/support-tickets', strictLimiter, async (req, res) => {
-  const { name, email, message, turnstile_token } = req.body;
-  if (!turnstile_token) return res.status(400).json({ success: false, error: 'Verification required' });
-  const isHuman = await verifyTurnstile(turnstile_token);
-  if (!isHuman) return res.status(400).json({ success: false, error: 'Verification failed' });
-  if (!name || !email || !message) return res.status(400).json({ success: false, error: 'All fields required' });
-  
-  if (!supabase) return res.json({ success: true, ticket: { id: Date.now() } });
-  
-  try {
-    const { data, error } = await supabase.from('support_tickets').insert([{ name: name.trim(), email: email.trim().toLowerCase(), message: message.trim(), status: 'open', created_at: new Date().toISOString() }]).select();
-    if (error) throw error;
-    res.json({ success: true, ticket: data[0] });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-app.put('/api/support-tickets/:id', async (req, res) => {
-  const { id } = req.params;
-  const { status } = req.body;
-  if (!supabase) return res.json({ success: true });
-  try {
-    await supabase.from('support_tickets').update({ status, updated_at: new Date().toISOString() }).eq('id', id);
-    res.json({ success: true });
+    res.json({ success: true, onlineCount: uniqueUsers.length, users: uniqueUsers.slice(0, 20) });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -755,117 +946,6 @@ app.post('/api/events/:id/register', async (req, res) => {
   }
 });
 
-// ==================== CONTACT FORM ====================
-
-app.post('/api/contact', async (req, res) => {
-  const { firstName, lastName, email, message, turnstile_token, supportType } = req.body;
-  
-  if (!turnstile_token) {
-    return res.status(400).json({ success: false, error: 'Verification required' });
-  }
-  
-  const isHuman = await verifyTurnstile(turnstile_token);
-  if (!isHuman) {
-    return res.status(400).json({ success: false, error: 'Verification failed' });
-  }
-  
-  if (!firstName || !lastName || !email || !message) {
-    return res.status(400).json({ success: false, error: 'All fields required' });
-  }
-  
-  if (!supabase) {
-    console.log('Contact form submission:', { firstName, lastName, email, message, supportType });
-    return res.json({ success: true, message: 'Message sent successfully!' });
-  }
-  
-  try {
-    const { error } = await supabase
-      .from('contact_messages')
-      .insert([{
-        first_name: firstName.trim(),
-        last_name: lastName.trim(),
-        email: email.trim().toLowerCase(),
-        message: message.trim(),
-        support_type: supportType || null,
-        status: 'unread',
-        created_at: new Date().toISOString()
-      }]);
-    
-    if (error) throw error;
-    res.json({ success: true, message: 'Message sent successfully!' });
-  } catch (error) {
-    console.error('Error saving contact message:', error);
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-app.get('/api/contact/messages', async (req, res) => {
-  if (!supabase) {
-    return res.json({ success: true, messages: [] });
-  }
-  
-  try {
-    const { data, error } = await supabase
-      .from('contact_messages')
-      .select('*')
-      .order('created_at', { ascending: false });
-    
-    if (error) throw error;
-    res.json({ success: true, messages: data || [] });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// ==================== SUPPORT US ====================
-
-app.post('/api/support-us', async (req, res) => {
-  const { firstName, lastName, email, phone, message, interests, availability, organization, donationAmount, supportType, turnstile_token } = req.body;
-  
-  if (!turnstile_token) {
-    return res.status(400).json({ success: false, error: 'Verification required' });
-  }
-  
-  const isHuman = await verifyTurnstile(turnstile_token);
-  if (!isHuman) {
-    return res.status(400).json({ success: false, error: 'Verification failed' });
-  }
-  
-  if (!firstName || !lastName || !email) {
-    return res.status(400).json({ success: false, error: 'Name and email required' });
-  }
-  
-  if (!supabase) {
-    console.log('Support inquiry:', { firstName, lastName, email, supportType });
-    return res.json({ success: true });
-  }
-  
-  try {
-    const { error } = await supabase
-      .from('support_inquiries')
-      .insert([{
-        first_name: firstName.trim(),
-        last_name: lastName.trim(),
-        email: email.trim().toLowerCase(),
-        phone: phone || null,
-        message: message || null,
-        interests: interests || [],
-        availability: availability || null,
-        organization: organization || null,
-        donation_amount: donationAmount || null,
-        support_type: supportType,
-        status: 'pending',
-        created_at: new Date().toISOString()
-      }]);
-    
-    if (error) throw error;
-    res.json({ success: true, message: 'Thank you for your support!' });
-  } catch (error) {
-    console.error('Error saving support inquiry:', error);
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
 // ==================== STATISTICS ====================
 
 app.get('/api/stats', async (req, res) => {
@@ -906,6 +986,7 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`\n🎵 Sound & Silence API running on port ${PORT}`);
   console.log(`📊 Health: http://localhost:${PORT}/api/health`);
+  console.log(`📧 Email: ${emailTransporter ? 'Configured' : 'Not configured'}`);
   console.log(`🎥 Vlogs: http://localhost:${PORT}/api/vlogs`);
   console.log(`📝 Blog: http://localhost:${PORT}/api/blog/posts`);
   console.log(`🎫 Tickets: http://localhost:${PORT}/api/support-tickets`);
