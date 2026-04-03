@@ -282,18 +282,43 @@ app.post('/api/online/track', async (req, res) => {
     return res.status(400).json({ success: false, error: 'Session ID required' });
   }
   
+  // Only track authenticated users
   let authenticatedUserId = null;
   let isAuthenticated = false;
+  let userEmail = null;
+  let userDisplayName = null;
   
   if (auth_token && supabase) {
     try {
-      const userId = parseInt(Buffer.from(auth_token, 'base64').toString().split(':')[0]);
-      const { data: user } = await supabase.from('app_users').select('id, name').eq('id', userId).single();
-      if (user) {
+      // Decode the auth token to get user ID
+      const decoded = Buffer.from(auth_token, 'base64').toString();
+      const userId = parseInt(decoded.split(':')[0]);
+      
+      const { data: user, error } = await supabase
+        .from('app_users')
+        .select('id, name, email')
+        .eq('id', userId)
+        .single();
+        
+      if (user && !error) {
         authenticatedUserId = user.id;
         isAuthenticated = true;
+        userEmail = user.email;
+        userDisplayName = user.name || user.email.split('@')[0];
       }
-    } catch (e) {}
+    } catch (e) {
+      console.log('Auth token decode error:', e);
+    }
+  }
+  
+  // Only proceed if user is authenticated
+  if (!isAuthenticated) {
+    return res.json({ 
+      success: true, 
+      onlineCount: 0, 
+      users: [],
+      message: 'Anonymous users not tracked'
+    });
   }
   
   if (!supabase) {
@@ -304,68 +329,155 @@ app.post('/api/online/track', async (req, res) => {
     const now = new Date().toISOString();
     const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
     
-    await supabase.from('online_users').delete().lt('last_seen', fiveMinutesAgo);
+    // Clean up old sessions (older than 5 minutes)
+    await supabase
+      .from('online_users')
+      .delete()
+      .lt('last_seen', fiveMinutesAgo);
     
-    const { data: existing } = await supabase.from('online_users').select('id').eq('session_id', session_id).maybeSingle();
+    // Check if session exists for this user
+    const { data: existing, error: findError } = await supabase
+      .from('online_users')
+      .select('id')
+      .eq('user_id', authenticatedUserId)
+      .maybeSingle();
     
     if (existing) {
-      await supabase.from('online_users').update({ 
-        last_seen: now, 
-        current_page: current_page || null, 
-        user_name: user_name || 'Guest', 
-        user_id: authenticatedUserId, 
-        is_authenticated: isAuthenticated 
-      }).eq('session_id', session_id);
+      // Update existing session
+      await supabase
+        .from('online_users')
+        .update({ 
+          last_seen: now,
+          current_page: current_page || null,
+          session_id: session_id,
+          user_agent: user_agent || null
+        })
+        .eq('user_id', authenticatedUserId);
     } else {
-      await supabase.from('online_users').insert([{ 
-        session_id, 
-        user_name: user_name || 'Guest', 
-        user_id: authenticatedUserId, 
-        is_authenticated: isAuthenticated, 
-        current_page: current_page || null, 
-        user_agent: user_agent || null, 
-        last_seen: now 
-      }]);
+      // Create new session for authenticated user only
+      await supabase
+        .from('online_users')
+        .insert([{ 
+          session_id: session_id,
+          user_id: authenticatedUserId,
+          user_name: userDisplayName || 'User',
+          is_authenticated: true,
+          current_page: current_page || null,
+          user_agent: user_agent || null,
+          last_seen: now,
+          created_at: now
+        }]);
     }
     
-    const { count: totalCount } = await supabase.from('online_users').select('*', { count: 'exact', head: true }).gte('last_seen', fiveMinutesAgo);
-    const { data: authenticatedUsers } = await supabase.from('online_users').select('user_name, user_id, current_page, last_seen').eq('is_authenticated', true).gte('last_seen', fiveMinutesAgo).order('last_seen', { ascending: false });
-    const { data: guestUsers } = await supabase.from('online_users').select('user_name, current_page, last_seen').eq('is_authenticated', false).gte('last_seen', fiveMinutesAgo).order('last_seen', { ascending: false }).limit(10);
+    // Get all authenticated online users (not guests)
+    const { data: onlineUsers, error: usersError } = await supabase
+      .from('online_users')
+      .select(`
+        id,
+        user_id,
+        user_name,
+        current_page,
+        last_seen,
+        app_users (email, name, avatar_url)
+      `)
+      .eq('is_authenticated', true)
+      .gte('last_seen', fiveMinutesAgo)
+      .order('last_seen', { ascending: false });
+    
+    if (usersError) throw usersError;
+    
+    // Format the response
+    const formattedUsers = (onlineUsers || []).map(user => ({
+      id: user.user_id,
+      name: user.user_name,
+      email: user.app_users?.email,
+      avatar: user.app_users?.avatar_url,
+      current_page: user.current_page,
+      last_seen: user.last_seen
+    }));
     
     res.json({ 
       success: true, 
-      onlineCount: totalCount || 0, 
-      authenticatedCount: authenticatedUsers?.length || 0, 
-      users: [...(authenticatedUsers || []), ...(guestUsers || [])] 
+      onlineCount: formattedUsers.length,
+      users: formattedUsers
     });
+    
   } catch (error) {
-    console.error('Error tracking user:', error);
+    console.error('Error tracking online user:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
 app.get('/api/online/count', async (req, res) => {
-  if (!supabase) return res.json({ success: true, onlineCount: 0, users: [] });
+  if (!supabase) {
+    return res.json({ success: true, onlineCount: 0, users: [] });
+  }
   
   try {
     const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
-    await supabase.from('online_users').delete().lt('last_seen', fiveMinutesAgo);
-    const { count } = await supabase.from('online_users').select('*', { count: 'exact', head: true }).gte('last_seen', fiveMinutesAgo);
-    const { data: users } = await supabase.from('online_users').select('user_name, current_page, last_seen, is_authenticated').gte('last_seen', fiveMinutesAgo).order('last_seen', { ascending: false });
     
-    const uniqueUsers = [];
-    const seenSessions = new Set();
-    for (const user of users) {
-      const key = `${user.user_name}_${user.current_page}`;
-      if (!seenSessions.has(key)) {
-        seenSessions.add(key);
-        uniqueUsers.push(user);
-      }
-    }
+    // Clean up old sessions
+    await supabase
+      .from('online_users')
+      .delete()
+      .lt('last_seen', fiveMinutesAgo);
     
-    res.json({ success: true, onlineCount: uniqueUsers.length, users: uniqueUsers.slice(0, 20) });
+    // Get only authenticated online users
+    const { data: onlineUsers, error: usersError } = await supabase
+      .from('online_users')
+      .select(`
+        id,
+        user_id,
+        user_name,
+        current_page,
+        last_seen,
+        app_users (email, name, avatar_url)
+      `)
+      .eq('is_authenticated', true)
+      .gte('last_seen', fiveMinutesAgo)
+      .order('last_seen', { ascending: false });
+    
+    if (usersError) throw usersError;
+    
+    const formattedUsers = (onlineUsers || []).map(user => ({
+      id: user.user_id,
+      name: user.user_name,
+      email: user.app_users?.email,
+      avatar: user.app_users?.avatar_url,
+      current_page: user.current_page,
+      last_seen: user.last_seen
+    }));
+    
+    res.json({ 
+      success: true, 
+      onlineCount: formattedUsers.length,
+      users: formattedUsers
+    });
+    
   } catch (error) {
+    console.error('Error getting online count:', error);
     res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/online/offline', async (req, res) => {
+  const { user_id } = req.body;
+  
+  if (!user_id || !supabase) {
+    return res.json({ success: true });
+  }
+  
+  try {
+    // Remove user from online users
+    await supabase
+      .from('online_users')
+      .delete()
+      .eq('user_id', user_id);
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error marking user offline:', error);
+    res.json({ success: false });
   }
 });
 
