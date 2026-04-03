@@ -616,37 +616,26 @@ app.get('/api/rate-limit-status', (req, res) => {
 
 app.post('/api/contact', async (req, res) => {
   const { firstName, lastName, email, message, turnstile_token, supportType } = req.body;
-  const ip = getClientIp(req);
   
-  // Check rate limit first
-  const rateLimitResult = checkRateLimit(ip, 'contact');
-  if (!rateLimitResult.allowed) {
-    return res.status(429).json({ 
-      success: false, 
-      error: rateLimitResult.reason,
-      rateLimit: {
-        remaining: rateLimitResult.remaining,
-        resetHours: rateLimitResult.resetHours,
-        waitSeconds: rateLimitResult.waitSeconds
-      }
-    });
+  console.log('📬 Contact form received:', { firstName, lastName, email, supportType });
+  
+  // Check required fields
+  if (!firstName || !lastName || !email || !message) {
+    console.log('❌ Missing required fields');
+    return res.status(400).json({ success: false, error: 'All fields required' });
   }
   
+  // Verify Turnstile
   if (!turnstile_token) {
+    console.log('❌ Missing Turnstile token');
     return res.status(400).json({ success: false, error: 'Verification required' });
   }
   
   const isHuman = await verifyTurnstile(turnstile_token);
   if (!isHuman) {
+    console.log('❌ Turnstile verification failed');
     return res.status(400).json({ success: false, error: 'Verification failed' });
   }
-  
-  if (!firstName || !lastName || !email || !message) {
-    return res.status(400).json({ success: false, error: 'All fields required' });
-  }
-  
-  // Record the submission
-  recordSubmission(ip, 'contact');
   
   // Send email to admin
   await sendContactEmailToAdmin({ firstName, lastName, email, message, supportType });
@@ -657,7 +646,7 @@ app.post('/api/contact', async (req, res) => {
   // Save to database
   if (supabase) {
     try {
-      const { error } = await supabase
+      const { data, error } = await supabase
         .from('contact_messages')
         .insert([{
           first_name: firstName.trim(),
@@ -665,25 +654,26 @@ app.post('/api/contact', async (req, res) => {
           email: email.trim().toLowerCase(),
           message: message.trim(),
           support_type: supportType || null,
-          ip_address: ip,
           status: 'unread',
           created_at: new Date().toISOString()
-        }]);
+        }])
+        .select();
       
-      if (error) throw error;
+      if (error) {
+        console.error('❌ Database error:', error);
+        throw error;
+      }
+      console.log('✅ Contact message saved to database:', data);
     } catch (error) {
-      console.error('Error saving contact message:', error);
+      console.error('❌ Error saving contact message:', error);
+      // Don't fail the request if database save fails, email already sent
     }
+  } else {
+    console.log('⚠️ Supabase not configured, skipping database save');
   }
   
-  res.json({ 
-    success: true, 
-    message: 'Message sent successfully! We\'ll get back to you soon.',
-    rateLimit: {
-      remaining: rateLimitResult.remaining,
-      message: `You have ${rateLimitResult.remaining} submission${rateLimitResult.remaining !== 1 ? 's' : ''} remaining today.`
-    }
-  });
+  console.log('✅ Contact form processed successfully');
+  res.json({ success: true, message: 'Message sent successfully! We\'ll get back to you soon.' });
 });
 
 app.get('/api/contact/messages', async (req, res) => {
