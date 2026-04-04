@@ -12,7 +12,7 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// ==================== PROXY TRUST SETTING ====================
+// ==================== PROXY TRUST ====================
 app.set('trust proxy', 1);
 console.log('✅ Trust proxy setting enabled');
 
@@ -46,7 +46,7 @@ try {
   console.log('⚠️ Email service not configured:', error.message);
 }
 
-// ==================== FIREBASE ADMIN SDK ====================
+// ==================== FIREBASE ADMIN SDK (optional) ====================
 let adminAuth = null;
 try {
   const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY || '{}');
@@ -63,17 +63,72 @@ try {
   console.warn('⚠️ Firebase Admin init error:', err.message);
 }
 
-// ==================== PROFESSIONAL EMAIL TEMPLATES (unchanged) ====================
-// ... (keep all existing email functions: sendContactEmailToAdmin, sendAutoReplyToUser,
+// ==================== TURNSTILE VERIFICATION FUNCTION ====================
+async function verifyTurnstile(token) {
+  if (!token) return false;
+  if (!CLOUDFLARE_SECRET_KEY) {
+    console.warn('⚠️ Cloudflare Turnstile not configured. Skipping verification.');
+    return true;
+  }
+  try {
+    const response = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        secret: CLOUDFLARE_SECRET_KEY,
+        response: token,
+      }).toString(),
+    });
+    const data = await response.json();
+    return data.success === true;
+  } catch (error) {
+    console.error('Turnstile verification error:', error);
+    return false;
+  }
+}
+
+// ==================== RATE LIMITING MIDDLEWARE ====================
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  message: 'Too many requests from this IP, please try again later.',
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use('/api/', limiter);
+
+const strictLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  skipSuccessfulRequests: true,
+  message: 'Too many attempts. Please try again later.',
+});
+
+// Request logging
+app.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
+  next();
+});
+
+// ==================== SUPABASE CLIENT ====================
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_ANON_KEY;
+if (!supabaseUrl || !supabaseKey) {
+  console.error('❌ Missing Supabase credentials!');
+  console.warn('⚠️ Running without Supabase - some features will not work');
+}
+const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
+
+// ==================== PROFESSIONAL EMAIL TEMPLATES (keep your existing functions) ====================
+// ... (Insert all your existing email functions: sendContactEmailToAdmin, sendAutoReplyToUser,
 // sendSupportTicketEmailToAdmin, sendSupportInquiryEmailToAdmin) ...
+// For brevity, I'm not repeating them here; keep your current implementations.
 
 // ==================== FORGOT PASSWORD – OTP FUNCTIONS ====================
-// Generate random 6-digit OTP
 function generateOTP() {
   return Math.floor(100000 + Math.random() * 900000).toString();
 }
 
-// Send password reset OTP email
 async function sendPasswordResetEmail(email, code) {
   if (!emailTransporter) return;
   const mailOptions = {
@@ -102,15 +157,12 @@ async function sendPasswordResetEmail(email, code) {
 }
 
 // ==================== PASSWORD RESET ENDPOINTS ====================
-// Request OTP
 app.post('/api/auth/forgot-password', async (req, res) => {
   const { email } = req.body;
   if (!email) return res.status(400).json({ success: false, error: 'Email required' });
-
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   if (!emailRegex.test(email)) return res.status(400).json({ success: false, error: 'Invalid email' });
 
-  // Check if user exists in Firebase Auth (optional but recommended)
   if (adminAuth) {
     try {
       await adminAuth.getUserByEmail(email);
@@ -120,13 +172,10 @@ app.post('/api/auth/forgot-password', async (req, res) => {
   }
 
   const code = generateOTP();
-  const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
-
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
   if (!supabase) return res.status(500).json({ success: false, error: 'Database error' });
 
-  // Invalidate previous unused codes for this email
   await supabase.from('password_resets').update({ used: true }).eq('email', email).eq('used', false);
-
   const { error } = await supabase.from('password_resets').insert([{
     email: email.toLowerCase(),
     code,
@@ -143,11 +192,9 @@ app.post('/api/auth/forgot-password', async (req, res) => {
   res.json({ success: true, message: 'OTP sent to your email' });
 });
 
-// Verify OTP
 app.post('/api/auth/verify-reset-otp', async (req, res) => {
   const { email, code } = req.body;
   if (!email || !code) return res.status(400).json({ success: false, error: 'Email and code required' });
-
   const { data, error } = await supabase
     .from('password_resets')
     .select('*')
@@ -157,29 +204,21 @@ app.post('/api/auth/verify-reset-otp', async (req, res) => {
     .single();
 
   if (error || !data) return res.status(400).json({ success: false, error: 'Invalid or expired OTP' });
+  if (new Date(data.expires_at) < new Date()) return res.status(400).json({ success: false, error: 'OTP has expired' });
 
-  if (new Date(data.expires_at) < new Date()) {
-    return res.status(400).json({ success: false, error: 'OTP has expired' });
-  }
-
-  // Mark as used
   await supabase.from('password_resets').update({ used: true }).eq('id', data.id);
-
   res.json({ success: true, message: 'OTP verified' });
 });
 
-// Reset password
 app.post('/api/auth/reset-password', async (req, res) => {
   const { email, newPassword } = req.body;
   if (!email || !newPassword) return res.status(400).json({ success: false, error: 'Email and new password required' });
   if (newPassword.length < 6) return res.status(400).json({ success: false, error: 'Password must be at least 6 characters' });
-
   if (!adminAuth) return res.status(500).json({ success: false, error: 'Password reset service unavailable' });
 
   try {
     const userRecord = await adminAuth.getUserByEmail(email);
     await adminAuth.updateUser(userRecord.uid, { password: newPassword });
-    // Delete all used OTPs for this email
     await supabase.from('password_resets').delete().eq('email', email.toLowerCase());
     res.json({ success: true, message: 'Password updated successfully. Please log in.' });
   } catch (err) {
@@ -188,7 +227,7 @@ app.post('/api/auth/reset-password', async (req, res) => {
   }
 });
 
-// ==================== TURNSTILE ====================
+// ==================== TURNSTILE ENDPOINTS ====================
 app.get('/api/turnstile/site-key', (req, res) => {
   res.json({ siteKey: CLOUDFLARE_SITE_KEY });
 });
@@ -203,14 +242,15 @@ app.post('/api/auth/verify-turnstile', async (req, res) => {
 
 // ==================== HEALTH CHECK ====================
 app.get('/api/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
+  res.json({
+    status: 'ok',
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
     environment: process.env.NODE_ENV || 'development',
     supabase: supabase ? 'connected' : 'not configured',
     turnstile: CLOUDFLARE_SITE_KEY ? 'configured' : 'not configured',
-    email: emailTransporter ? 'configured' : 'not configured'
+    email: emailTransporter ? 'configured' : 'not configured',
+    firebaseAdmin: adminAuth ? 'configured' : 'not configured'
   });
 });
 
@@ -221,10 +261,10 @@ app.post('/api/contact', async (req, res) => {
   const isHuman = await verifyTurnstile(turnstile_token);
   if (!isHuman) return res.status(400).json({ success: false, error: 'Verification failed' });
   if (!firstName || !lastName || !email || !message) return res.status(400).json({ success: false, error: 'All fields required' });
-  
+
   await sendContactEmailToAdmin({ firstName, lastName, email, message, supportType });
   await sendAutoReplyToUser(email, firstName, message);
-  
+
   if (supabase) {
     try {
       await supabase.from('contact_messages').insert([{
@@ -263,10 +303,10 @@ app.post('/api/support-tickets', strictLimiter, async (req, res) => {
   const isHuman = await verifyTurnstile(turnstile_token);
   if (!isHuman) return res.status(400).json({ success: false, error: 'Verification failed' });
   if (!name || !email || !message) return res.status(400).json({ success: false, error: 'All fields required' });
-  
+
   await sendSupportTicketEmailToAdmin({ name, email, message });
   if (!supabase) return res.json({ success: true, ticket: { id: Date.now() } });
-  
+
   try {
     const { data, error } = await supabase.from('support_tickets').insert([{
       name: name.trim(), email: email.trim().toLowerCase(), message: message.trim(),
@@ -294,10 +334,10 @@ app.post('/api/support-us', async (req, res) => {
   const isHuman = await verifyTurnstile(turnstile_token);
   if (!isHuman) return res.status(400).json({ success: false, error: 'Verification failed' });
   if (!firstName || !lastName || !email) return res.status(400).json({ success: false, error: 'Name and email required' });
-  
+
   await sendSupportInquiryEmailToAdmin({ firstName, lastName, email, phone, message, supportType, organization, donationAmount });
   if (!supabase) return res.json({ success: true });
-  
+
   try {
     await supabase.from('support_inquiries').insert([{
       first_name: firstName.trim(), last_name: lastName.trim(), email: email.trim().toLowerCase(),
@@ -322,10 +362,10 @@ app.get('/api/auth/me', async (req, res) => {
 
 app.put('/api/users/:id', async (req, res) => {
   const { id } = req.params;
-  const { name, nickname, birth_date, hobbies, music_genres, location, bio } = req.body;
+  const updates = req.body;
   if (!supabase) return res.json({ success: true });
   try {
-    await supabase.from('app_users').update({ name, nickname, birth_date, hobbies, music_genres, location, bio, birthdate_set: !!birth_date, updated_at: new Date().toISOString() }).eq('id', id);
+    await supabase.from('app_users').update(updates).eq('id', id);
     res.json({ success: true });
   } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
