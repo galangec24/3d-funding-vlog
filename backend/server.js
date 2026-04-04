@@ -811,9 +811,18 @@ app.delete('/api/events/:id', async (req, res) => {
 
 app.post('/api/events/:id/register', async (req, res) => {
   const { id } = req.params;
-  const { user_name, user_email, user_phone, special_requests } = req.body;
+  const { user_name, user_email, user_phone, special_requests, user_id, auth_token } = req.body;
   if (!user_name || !user_email) return res.status(400).json({ success: false, error: 'Name and email required' });
   if (!supabase) return res.json({ success: true });
+
+  // Try to get user_id from auth_token if not provided
+  let finalUserId = user_id || null;
+  if (!finalUserId && auth_token) {
+    try {
+      finalUserId = parseInt(Buffer.from(auth_token, 'base64').toString().split(':')[0]);
+    } catch (e) {}
+  }
+
   try {
     const { data: event } = await supabase.from('events').select('capacity, status').eq('id', id).single();
     if (event.status !== 'upcoming') return res.status(400).json({ success: false, error: 'Event not open for registration' });
@@ -822,13 +831,78 @@ app.post('/api/events/:id/register', async (req, res) => {
       if (count >= event.capacity) return res.status(400).json({ success: false, error: 'Event is full' });
     }
     const { data, error } = await supabase.from('event_registrations').insert([{
-      event_id: id, user_name: user_name.trim(), user_email: user_email.trim().toLowerCase(),
-      user_phone: user_phone || null, special_requests: special_requests || null,
+      event_id: id,
+      user_name: user_name.trim(),
+      user_email: user_email.trim().toLowerCase(),
+      user_phone: user_phone || null,
+      special_requests: special_requests || null,
+      user_id: finalUserId,
+      status: 'pending',   // default status
       registered_at: new Date().toISOString()
     }]).select();
     if (error) throw error;
     res.json({ success: true, registration: data[0] });
-  } catch (error) { res.status(500).json({ success: false, error: error.message }); }
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/events/:id/registrations', async (req, res) => {
+  const { id } = req.params;
+  if (!supabase) return res.status(500).json({ success: false, error: 'Database error' });
+  try {
+    const { data, error } = await supabase
+      .from('event_registrations')
+      .select('*')
+      .eq('event_id', id)
+      .order('registered_at', { ascending: false });
+    if (error) throw error;
+    res.json({ success: true, registrations: data });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Update registration status (accept/reject) – admin only
+app.put('/api/event-registrations/:id/status', async (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body; // 'accepted', 'rejected', 'pending'
+  if (!['pending', 'accepted', 'rejected'].includes(status)) {
+    return res.status(400).json({ success: false, error: 'Invalid status' });
+  }
+  if (!supabase) return res.status(500).json({ success: false, error: 'Database error' });
+  try {
+    const { error } = await supabase
+      .from('event_registrations')
+      .update({ status, updated_at: new Date().toISOString() })
+      .eq('id', id);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get registrations for the currently logged‑in user
+app.get('/api/my-registrations', async (req, res) => {
+  const token = req.headers.authorization?.split('Bearer ')[1];
+  if (!token || !supabase) return res.json({ success: true, registrations: [] });
+  try {
+    const userId = parseInt(Buffer.from(token, 'base64').toString().split(':')[0]);
+    const { data, error } = await supabase
+      .from('event_registrations')
+      .select(`
+        id,
+        status,
+        registered_at,
+        events!inner (id, title, event_date, location, image_url)
+      `)
+      .eq('user_id', userId);
+    if (error) throw error;
+    res.json({ success: true, registrations: data });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
 // ==================== STATISTICS ====================
