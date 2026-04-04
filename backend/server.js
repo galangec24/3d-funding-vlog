@@ -711,7 +711,6 @@ app.put('/api/users/:id', async (req, res) => {
 
 // ==================== USER STATISTICS ====================
 
-
 app.get('/api/users/count', async (req, res) => {
   if (!supabase) {
     return res.json({ success: true, count: 0 });
@@ -729,7 +728,6 @@ app.get('/api/users/count', async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 });
-
 
 app.get('/api/users/stats/age', async (req, res) => {
   if (!supabase) {
@@ -811,6 +809,8 @@ app.get('/api/users/:id', async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 });
+
+
 
 // ==================== ONLINE USERS ====================
 
