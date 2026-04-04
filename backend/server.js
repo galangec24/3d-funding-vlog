@@ -491,19 +491,30 @@ app.get('/api/auth/me', async (req, res) => {
   if (!token || !supabase) return res.json({ success: false, user: null });
   try {
     const userId = parseInt(Buffer.from(token, 'base64').toString().split(':')[0]);
-    const { data: user } = await supabase.from('app_users').select('id, email, name, user_type, nickname, hobbies, music_genres, location, bio, birth_date').eq('id', userId).single();
+    const { data: user } = await supabase.from('app_users').select('id, email, name, user_type, nickname, hobbies, music_genres, location, bio, birth_date, gender').eq('id', userId).single();
     res.json({ success: true, user: user || null });
   } catch (error) { res.json({ success: false, user: null }); }
 });
 
 app.put('/api/users/:id', async (req, res) => {
   const { id } = req.params;
-  const updates = req.body;
+  const { name, nickname, birth_date, hobbies, music_genres, location, bio, gender } = req.body;
   if (!supabase) return res.json({ success: true });
   try {
-    await supabase.from('app_users').update(updates).eq('id', id);
+    const { error } = await supabase
+      .from('app_users')
+      .update({ 
+        name, nickname, birth_date, hobbies, music_genres, location, bio,
+        birthdate_set: !!birth_date,
+        gender: gender || 'prefer_not_to_say',
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', id);
+    if (error) throw error;
     res.json({ success: true });
-  } catch (error) { res.status(500).json({ success: false, error: error.message }); }
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
 // ==================== USER STATISTICS ====================
@@ -548,7 +559,7 @@ app.get('/api/users/:id', async (req, res) => {
   const { id } = req.params;
   if (!supabase) return res.json({ success: false, user: null });
   try {
-    const { data: user } = await supabase.from('app_users').select('id, name, nickname, location, bio, hobbies, music_genres, birth_date').eq('id', id).single();
+    const { data: user } = await supabase.from('app_users').select('id, name, nickname, location, bio, hobbies, music_genres, birth_date, gender').eq('id', id).single();
     res.json({ success: true, user });
   } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
