@@ -156,7 +156,6 @@ async function sendPasswordResetEmail(email, code) {
   }
 }
 
-// ==================== PASSWORD RESET ENDPOINTS ====================
 app.post('/api/auth/forgot-password', async (req, res) => {
   const { email } = req.body;
   if (!email) return res.status(400).json({ success: false, error: 'Email required' });
