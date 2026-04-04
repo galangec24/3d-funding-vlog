@@ -6,6 +6,7 @@ import rateLimit from 'express-rate-limit';
 import nodemailer from 'nodemailer';
 import admin from 'firebase-admin';
 import { getAuth as getAdminAuth } from 'firebase-admin/auth';
+import net from 'net';  // for SMTP debug endpoint
 
 dotenv.config();
 
@@ -27,18 +28,25 @@ app.use(express.json());
 const CLOUDFLARE_SECRET_KEY = process.env.CLOUDFLARE_SECRET_KEY || '';
 const CLOUDFLARE_SITE_KEY = process.env.CLOUDFLARE_SITE_KEY || '';
 
-// ==================== EMAIL CONFIGURATION ====================
+// ==================== EMAIL CONFIGURATION (FIXED) ====================
 let emailTransporter = null;
 try {
   if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
+    // Explicit SMTP configuration with timeouts – solves connection timeout
     emailTransporter = nodemailer.createTransport({
-      service: 'gmail',
+      host: 'smtp.gmail.com',      // or process.env.SMTP_HOST if you switch providers
+      port: 587,                    // or process.env.SMTP_PORT
+      secure: false,                // true for 465, false for 587
       auth: {
         user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS
-      }
+        pass: process.env.EMAIL_PASS,
+      },
+      // Critical timeouts (milliseconds)
+      connectionTimeout: 10000,
+      greetingTimeout: 10000,
+      socketTimeout: 15000,
     });
-    console.log('✅ Email service configured');
+    console.log('✅ Email service configured (explicit SMTP)');
   } else {
     console.log('⚠️ Email credentials not set - email features disabled');
   }
@@ -63,235 +71,131 @@ try {
   console.warn('⚠️ Firebase Admin init error:', err.message);
 }
 
-// ==================== PROFESSIONAL EMAIL TEMPLATES ====================
-
-// Send contact form email to admin
-async function sendContactEmailToAdmin(data) {
-  if (!emailTransporter) {
-    console.log('📧 Email not configured. Would have sent:', data);
-    return;
+// ==================== TURNSTILE VERIFICATION ====================
+async function verifyTurnstile(token) {
+  if (!token) return false;
+  if (!CLOUDFLARE_SECRET_KEY) {
+    console.warn('⚠️ Cloudflare Turnstile not configured. Skipping verification.');
+    return true;
   }
-  
-  const { firstName, lastName, email, message, supportType } = data;
-  const currentDate = new Date().toLocaleString('en-GB', { timeZone: 'Europe/London' });
-  
-  const mailOptions = {
-    from: `"${firstName} ${lastName} via Sound & Silence" <${process.env.EMAIL_USER}>`,
-    replyTo: email,
-    to: process.env.ADMIN_EMAIL || process.env.EMAIL_USER,
-    subject: `📬 New Contact Form Submission from ${firstName} ${lastName}`,
-    html: `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>New Contact Form Submission</title>
-        <style>
-          body { font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; color: #333; }
-          .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-          .header { background: linear-gradient(135deg, #8b5cf6, #ec4899); padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }
-          .header h1 { color: white; margin: 0; font-size: 24px; }
-          .content { background: #f9fafb; padding: 30px; border-radius: 0 0 10px 10px; border: 1px solid #e5e7eb; border-top: none; }
-          .info-box { background: white; padding: 20px; border-radius: 8px; margin: 15px 0; border-left: 4px solid #8b5cf6; }
-          .label { font-weight: bold; color: #4b5563; margin-bottom: 5px; }
-          .value { color: #1f2937; margin-bottom: 15px; }
-          .message-box { background: #f3f4f6; padding: 15px; border-radius: 8px; margin-top: 10px; white-space: pre-wrap; }
-          .footer { text-align: center; padding: 20px; font-size: 12px; color: #6b7280; border-top: 1px solid #e5e7eb; margin-top: 20px; }
-          .reply-note { background: #fef3c7; padding: 10px; border-radius: 5px; margin-top: 15px; text-align: center; font-size: 13px; }
-        </style>
-      </head>
-      <body>
-        <div class="container">
-          <div class="header">
-            <h1>🎵 Sound & Silence</h1>
-            <p style="color: rgba(255,255,255,0.9); margin: 5px 0 0;">New Contact Form Submission</p>
-          </div>
-          <div class="content">
-            <div class="info-box">
-              <div class="label">📋 Submission Details</div>
-              <div class="value">Date: ${currentDate}</div>
-              <div class="label">👤 From:</div>
-              <div class="value">${firstName} ${lastName}</div>
-              <div class="label">📧 Email:</div>
-              <div class="value"><a href="mailto:${email}" style="color: #8b5cf6;">${email}</a></div>
-              ${supportType ? `<div class="label">🏷️ Inquiry Type:</div><div class="value">${supportType.charAt(0).toUpperCase() + supportType.slice(1)}</div>` : ''}
-              <div class="label">💬 Message:</div>
-              <div class="message-box">${message.replace(/\n/g, '<br>')}</div>
-            </div>
-            <div class="reply-note">
-              💡 <strong>Quick Reply:</strong> Simply click "Reply" to respond directly to ${firstName} at ${email}
-            </div>
-          </div>
-          <div class="footer">
-            <p>Sound & Silence — Science-based sober events in East London</p>
-            <p>© ${new Date().getFullYear()} Sound & Silence. All rights reserved.</p>
-          </div>
-        </div>
-      </body>
-      </html>
-    `
-  };
-  
   try {
-    await emailTransporter.sendMail(mailOptions);
-    console.log('✅ Admin email sent for contact form');
+    const response = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        secret: CLOUDFLARE_SECRET_KEY,
+        response: token,
+      }).toString(),
+    });
+    const data = await response.json();
+    return data.success === true;
   } catch (error) {
-    console.error('❌ Failed to send admin email:', error);
+    console.error('Turnstile verification error:', error);
+    return false;
   }
 }
 
-// Send auto-reply to user
-async function sendAutoReplyToUser(email, firstName, message) {
+// ==================== RATE LIMITING ====================
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  message: 'Too many requests from this IP, please try again later.',
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use('/api/', limiter);
+
+const strictLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  skipSuccessfulRequests: true,
+  message: 'Too many attempts. Please try again later.',
+});
+
+// Request logging
+app.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
+  next();
+});
+
+// ==================== SUPABASE CLIENT ====================
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_ANON_KEY;
+if (!supabaseUrl || !supabaseKey) {
+  console.error('❌ Missing Supabase credentials!');
+  console.warn('⚠️ Running without Supabase - some features will not work');
+}
+const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
+
+// ==================== PROFESSIONAL EMAIL TEMPLATES ====================
+// All email sending functions – now using the fixed transporter
+
+async function sendContactEmailToAdmin({ firstName, lastName, email, message, supportType }) {
   if (!emailTransporter) return;
-  
   const mailOptions = {
-    from: `"Sound & Silence Team" <${process.env.EMAIL_USER}>`,
-    to: email,
-    subject: '✨ Thank you for contacting Sound & Silence',
+    from: process.env.EMAIL_USER,
+    to: process.env.ADMIN_EMAIL || process.env.EMAIL_USER,
+    subject: `New Contact Message from ${firstName} ${lastName}`,
     html: `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Thank You for Contacting Sound & Silence</title>
-        <style>
-          body { font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; color: #333; }
-          .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-          .header { background: linear-gradient(135deg, #8b5cf6, #ec4899); padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }
-          .header h1 { color: white; margin: 0; font-size: 24px; }
-          .content { background: #f9fafb; padding: 30px; border-radius: 0 0 10px 10px; border: 1px solid #e5e7eb; border-top: none; }
-          .greeting { font-size: 18px; margin-bottom: 20px; }
-          .message-preview { background: white; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #8b5cf6; }
-          .button { display: inline-block; background: #8b5cf6; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; margin-top: 15px; }
-          .footer { text-align: center; padding: 20px; font-size: 12px; color: #6b7280; border-top: 1px solid #e5e7eb; margin-top: 20px; }
-          .social-links { margin-top: 15px; }
-          .social-links a { color: #8b5cf6; text-decoration: none; margin: 0 10px; }
-        </style>
-      </head>
-      <body>
-        <div class="container">
-          <div class="header">
-            <h1>🎵 Sound & Silence</h1>
-            <p style="color: rgba(255,255,255,0.9); margin: 5px 0 0;">We've received your message</p>
-          </div>
-          <div class="content">
-            <div class="greeting">
-              <p>Dear ${firstName},</p>
-              <p>Thank you for reaching out to <strong>Sound & Silence</strong>. We truly appreciate you taking the time to connect with us.</p>
-            </div>
-            <p>This email confirms that we have received your message. Our team will review it and get back to you within <strong>24 hours</strong>.</p>
-            <div class="message-preview">
-              <p style="font-weight: bold; margin-bottom: 10px;">📝 Your message:</p>
-              <p style="color: #4b5563;">"${message.substring(0, 200)}${message.length > 200 ? '...' : ''}"</p>
-            </div>
-            <p>In the meantime, here are some helpful resources:</p>
-            <ul>
-              <li>📅 <a href="https://soundandsilence.web.app/events" style="color: #8b5cf6;">Upcoming Events</a> - Join our sober social gatherings</li>
-              <li>👥 <a href="https://soundandsilence.web.app/community" style="color: #8b5cf6;">Community Blog</a> - Read stories from our members</li>
-              <li>🤝 <a href="https://soundandsilence.web.app/support/volunteer" style="color: #8b5cf6;">Get Involved</a> - Volunteer, partner, or donate</li>
-            </ul>
-            <div style="text-align: center;">
-              <a href="https://soundandsilence.web.app" class="button">Visit Our Website</a>
-            </div>
-          </div>
-          <div class="footer">
-            <p>Sound & Silence — Science-based sober events in East London</p>
-            <div class="social-links">
-              <a href="#">Instagram</a> • <a href="#">Twitter</a> • <a href="#">TikTok</a>
-            </div>
-            <p>© ${new Date().getFullYear()} Sound & Silence. All rights reserved.</p>
-            <p style="font-size: 11px;">You received this email because you contacted us through our website.</p>
-          </div>
-        </div>
-      </body>
-      </html>
+      <div style="font-family: Arial, sans-serif; max-width: 600px;">
+        <h2>New Contact Form Submission</h2>
+        <p><strong>Name:</strong> ${firstName} ${lastName}</p>
+        <p><strong>Email:</strong> ${email}</p>
+        <p><strong>Type:</strong> ${supportType || 'General'}</p>
+        <p><strong>Message:</strong></p>
+        <p>${message.replace(/\n/g, '<br>')}</p>
+      </div>
     `
   };
-  
   try {
     await emailTransporter.sendMail(mailOptions);
-    console.log('✅ Auto-reply sent to user');
+    console.log('✅ Admin contact email sent');
+  } catch (error) {
+    console.error('❌ Failed to send admin contact email:', error);
+  }
+}
+
+async function sendAutoReplyToUser(email, firstName, userMessage) {
+  if (!emailTransporter) return;
+  const mailOptions = {
+    from: process.env.EMAIL_USER,
+    to: email,
+    subject: 'We received your message – Sound & Silence',
+    html: `
+      <div style="font-family: Arial, sans-serif; max-width: 600px;">
+        <h2>Hello ${firstName},</h2>
+        <p>Thank you for reaching out to Sound & Silence. We have received your message and will get back to you within 24 hours.</p>
+        <p><strong>Your message:</strong><br>${userMessage.replace(/\n/g, '<br>')}</p>
+        <p>In the meantime, feel free to explore our <a href="https://soundandsilence.com/events">upcoming events</a>.</p>
+        <hr>
+        <p style="font-size: 12px;">Sound & Silence – Science-based sober events</p>
+      </div>
+    `
+  };
+  try {
+    await emailTransporter.sendMail(mailOptions);
+    console.log('✅ Auto-reply sent to', email);
   } catch (error) {
     console.error('❌ Failed to send auto-reply:', error);
   }
 }
 
-// Send support ticket email to admin
-async function sendSupportTicketEmailToAdmin(data) {
+async function sendSupportTicketEmailToAdmin({ name, email, message }) {
   if (!emailTransporter) return;
-  
-  const { name, email, message } = data;
-  const ticketId = 'TKT-' + Date.now().toString().slice(-8);
-  const currentDate = new Date().toLocaleString('en-GB', { timeZone: 'Europe/London' });
-  
   const mailOptions = {
-    from: `"${name} via Sound & Silence Support" <${process.env.EMAIL_USER}>`,
-    replyTo: email,
+    from: process.env.EMAIL_USER,
     to: process.env.ADMIN_EMAIL || process.env.EMAIL_USER,
-    subject: `🎫 New Support Ticket #${ticketId} from ${name}`,
+    subject: `New Support Ticket from ${name}`,
     html: `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>New Support Ticket</title>
-        <style>
-          body { font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; color: #333; }
-          .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-          .header { background: linear-gradient(135deg, #8b5cf6, #ec4899); padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }
-          .header h1 { color: white; margin: 0; font-size: 24px; }
-          .content { background: #f9fafb; padding: 30px; border-radius: 0 0 10px 10px; border: 1px solid #e5e7eb; border-top: none; }
-          .ticket-box { background: white; padding: 20px; border-radius: 8px; margin: 15px 0; border-left: 4px solid #ef4444; }
-          .label { font-weight: bold; color: #4b5563; margin-bottom: 5px; }
-          .value { color: #1f2937; margin-bottom: 15px; }
-          .priority-high { background: #fee2e2; padding: 5px 10px; border-radius: 5px; display: inline-block; font-size: 12px; color: #dc2626; }
-          .footer { text-align: center; padding: 20px; font-size: 12px; color: #6b7280; border-top: 1px solid #e5e7eb; margin-top: 20px; }
-        </style>
-      </head>
-      <body>
-        <div class="container">
-          <div class="header">
-            <h1>🎵 Sound & Silence</h1>
-            <p style="color: rgba(255,255,255,0.9); margin: 5px 0 0;">New Support Ticket</p>
-          </div>
-          <div class="content">
-            <div class="ticket-box">
-              <div style="display: flex; justify-content: space-between; margin-bottom: 15px;">
-                <span class="label">🎫 Ticket #:</span>
-                <span class="value" style="font-family: monospace;">${ticketId}</span>
-              </div>
-              <div style="display: flex; justify-content: space-between; margin-bottom: 15px;">
-                <span class="label">📅 Date:</span>
-                <span class="value">${currentDate}</span>
-              </div>
-              <div style="display: flex; justify-content: space-between; margin-bottom: 15px;">
-                <span class="label">⚠️ Priority:</span>
-                <span class="priority-high">Normal</span>
-              </div>
-              <div class="label">👤 From:</div>
-              <div class="value">${name}</div>
-              <div class="label">📧 Email:</div>
-              <div class="value"><a href="mailto:${email}" style="color: #8b5cf6;">${email}</a></div>
-              <div class="label">💬 Message:</div>
-              <div class="value" style="background: #f3f4f6; padding: 12px; border-radius: 6px; margin-top: 5px;">${message.replace(/\n/g, '<br>')}</div>
-            </div>
-            <div style="background: #e0e7ff; padding: 12px; border-radius: 6px; text-align: center;">
-              <p style="margin: 0; font-size: 14px;">💡 Reply to this email to respond to ${name}</p>
-            </div>
-          </div>
-          <div class="footer">
-            <p>Manage tickets in the <a href="https://soundandsilence.web.app/admin" style="color: #8b5cf6;">Admin Dashboard</a></p>
-            <p>© ${new Date().getFullYear()} Sound & Silence. All rights reserved.</p>
-          </div>
-        </div>
-      </body>
-      </html>
+      <div style="font-family: Arial, sans-serif;">
+        <h2>Support Ticket</h2>
+        <p><strong>Name:</strong> ${name}</p>
+        <p><strong>Email:</strong> ${email}</p>
+        <p><strong>Message:</strong></p>
+        <p>${message.replace(/\n/g, '<br>')}</p>
+      </div>
     `
   };
-  
   try {
     await emailTransporter.sendMail(mailOptions);
     console.log('✅ Support ticket email sent to admin');
@@ -300,171 +204,108 @@ async function sendSupportTicketEmailToAdmin(data) {
   }
 }
 
-// Send support inquiry email (volunteer/partner/donate)
-async function sendSupportInquiryEmailToAdmin(data) {
+async function sendSupportInquiryEmailToAdmin({ firstName, lastName, email, phone, message, supportType, organization, donationAmount }) {
   if (!emailTransporter) return;
-  
-  const { firstName, lastName, email, phone, message, supportType, organization, donationAmount } = data;
-  const currentDate = new Date().toLocaleString('en-GB', { timeZone: 'Europe/London' });
-  
-  const typeColors = {
-    volunteer: '#8b5cf6',
-    partner: '#ec4899',
-    donate: '#10b981'
-  };
-  const color = typeColors[supportType] || '#8b5cf6';
-  
-  const subject = `🤝 New ${supportType.charAt(0).toUpperCase() + supportType.slice(1)} Inquiry from ${firstName} ${lastName}`;
-  
-  let detailsHtml = '';
-  if (organization) detailsHtml += `<div style="display: flex; justify-content: space-between; margin-bottom: 12px;"><span class="label">🏢 Organization:</span><span class="value">${organization}</span></div>`;
-  if (phone) detailsHtml += `<div style="display: flex; justify-content: space-between; margin-bottom: 12px;"><span class="label">📞 Phone:</span><span class="value">${phone}</span></div>`;
-  if (donationAmount) detailsHtml += `<div style="display: flex; justify-content: space-between; margin-bottom: 12px;"><span class="label">💰 Donation Amount:</span><span class="value">${donationAmount}</span></div>`;
-  
   const mailOptions = {
-    from: `"${firstName} ${lastName} via Sound & Silence" <${process.env.EMAIL_USER}>`,
-    replyTo: email,
+    from: process.env.EMAIL_USER,
     to: process.env.ADMIN_EMAIL || process.env.EMAIL_USER,
-    subject: subject,
+    subject: `New Support Inquiry: ${supportType || 'General'} from ${firstName} ${lastName}`,
     html: `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>New Support Inquiry</title>
-        <style>
-          body { font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; color: #333; }
-          .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-          .header { background: linear-gradient(135deg, ${color}, ${color}dd); padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }
-          .header h1 { color: white; margin: 0; font-size: 24px; }
-          .content { background: #f9fafb; padding: 30px; border-radius: 0 0 10px 10px; border: 1px solid #e5e7eb; border-top: none; }
-          .inquiry-box { background: white; padding: 20px; border-radius: 8px; margin: 15px 0; border-left: 4px solid ${color}; }
-          .label { font-weight: bold; color: #4b5563; margin-bottom: 5px; }
-          .value { color: #1f2937; margin-bottom: 12px; }
-          .footer { text-align: center; padding: 20px; font-size: 12px; color: #6b7280; border-top: 1px solid #e5e7eb; margin-top: 20px; }
-          .badge { display: inline-block; background: ${color}20; color: ${color}; padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: bold; margin-bottom: 15px; }
-        </style>
-      </head>
-      <body>
-        <div class="container">
-          <div class="header">
-            <h1>🎵 Sound & Silence</h1>
-            <p style="color: rgba(255,255,255,0.9); margin: 5px 0 0;">New ${supportType.charAt(0).toUpperCase() + supportType.slice(1)} Inquiry</p>
-          </div>
-          <div class="content">
-            <div class="inquiry-box">
-              <div style="text-align: center;">
-                <span class="badge">${supportType.toUpperCase()}</span>
-              </div>
-              <div style="display: flex; justify-content: space-between; margin-bottom: 12px;">
-                <span class="label">📅 Date:</span>
-                <span class="value">${currentDate}</span>
-              </div>
-              <div style="display: flex; justify-content: space-between; margin-bottom: 12px;">
-                <span class="label">👤 Name:</span>
-                <span class="value">${firstName} ${lastName}</span>
-              </div>
-              <div style="display: flex; justify-content: space-between; margin-bottom: 12px;">
-                <span class="label">📧 Email:</span>
-                <span class="value"><a href="mailto:${email}" style="color: ${color};">${email}</a></span>
-              </div>
-              ${detailsHtml}
-              <div class="label">💬 Message:</div>
-              <div class="value" style="background: #f3f4f6; padding: 12px; border-radius: 6px; margin-top: 5px;">${message || 'No additional message provided.'}</div>
-            </div>
-            <div style="background: #e0e7ff; padding: 12px; border-radius: 6px; text-align: center;">
-              <p style="margin: 0; font-size: 14px;">💡 Reply to this email to respond to ${firstName}</p>
-            </div>
-          </div>
-          <div class="footer">
-            <p>Sound & Silence — Science-based sober events in East London</p>
-            <p>© ${new Date().getFullYear()} Sound & Silence. All rights reserved.</p>
-          </div>
-        </div>
-      </body>
-      </html>
+      <div style="font-family: Arial, sans-serif;">
+        <h2>Support Inquiry</h2>
+        <p><strong>Name:</strong> ${firstName} ${lastName}</p>
+        <p><strong>Email:</strong> ${email}</p>
+        <p><strong>Phone:</strong> ${phone || 'Not provided'}</p>
+        <p><strong>Organization:</strong> ${organization || 'Not provided'}</p>
+        <p><strong>Support Type:</strong> ${supportType || 'Not specified'}</p>
+        <p><strong>Donation Amount:</strong> ${donationAmount || 'Not specified'}</p>
+        <p><strong>Message:</strong></p>
+        <p>${message ? message.replace(/\n/g, '<br>') : 'No message provided'}</p>
+      </div>
     `
   };
-  
   try {
     await emailTransporter.sendMail(mailOptions);
-    console.log(`✅ ${supportType} inquiry email sent to admin`);
+    console.log('✅ Support inquiry email sent to admin');
   } catch (error) {
-    console.error(`❌ Failed to send ${supportType} inquiry email:`, error);
+    console.error('❌ Failed to send support inquiry email:', error);
   }
 }
 
-// ==================== PASSWORD RESET OTP FUNCTIONS ====================
-
+// ==================== FORGOT PASSWORD – OTP FUNCTIONS ====================
 function generateOTP() {
   return Math.floor(100000 + Math.random() * 900000).toString();
 }
 
 async function sendPasswordResetEmail(email, code) {
-  // Always log the OTP to console (visible in Render logs) – essential for debugging email timeouts
-  console.log(`🔐 PASSWORD RESET OTP for ${email}: ${code}`);
-  console.log(`⏰ This OTP is valid for 10 minutes.`);
-
-  if (!emailTransporter) {
-    console.warn('⚠️ Email not configured. User must check logs for OTP.');
-    return;
-  }
-
-  try {
-    await emailTransporter.sendMail({
-      from: process.env.EMAIL_USER,
-      to: email,
-      subject: 'Sound & Silence – Password Reset OTP',
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; padding: 20px;">
-          <h2>Reset Your Password</h2>
-          <p>Use the following OTP to reset your password. It expires in 10 minutes.</p>
-          <div style="font-size: 32px; font-weight: bold; background: #f3f4f6; padding: 15px; text-align: center; border-radius: 8px;">
-            ${code}
-          </div>
-          <p>If you did not request this, please ignore this email.</p>
-          <hr>
-          <p style="font-size: 12px; color: #6b7280;">Sound & Silence – Science-based sober events</p>
+  if (!emailTransporter) return;
+  const mailOptions = {
+    from: process.env.EMAIL_USER,
+    to: email,
+    subject: 'Sound & Silence – Password Reset OTP',
+    html: `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; padding: 20px;">
+        <h2>Reset Your Password</h2>
+        <p>Use the following OTP to reset your password. It expires in 10 minutes.</p>
+        <div style="font-size: 32px; font-weight: bold; background: #f3f4f6; padding: 15px; text-align: center; border-radius: 8px;">
+          ${code}
         </div>
-      `
-    });
-    console.log('✅ Password reset OTP email sent to', email);
-  } catch (err) {
-    console.error('❌ Failed to send password reset email:', err.message);
-    // Do not throw – the OTP is already logged, so the flow continues.
+        <p>If you did not request this, please ignore this email.</p>
+        <hr>
+        <p style="font-size: 12px; color: #6b7280;">Sound & Silence – Science-based sober events</p>
+      </div>
+    `
+  };
+  try {
+    await emailTransporter.sendMail(mailOptions);
+    console.log('✅ Password reset OTP sent to', email);
+  } catch (error) {
+    console.error('❌ Failed to send password reset OTP:', error);
+    throw error; // Re-throw so the endpoint knows it failed
   }
 }
 
-// ==================== PASSWORD RESET ENDPOINTS ====================
+// ==================== DEBUG SMTP ENDPOINT ====================
+app.get('/api/debug/smtp-test', (req, res) => {
+  const socket = net.createConnection(587, 'smtp.gmail.com');
+  socket.setTimeout(5000);
 
+  socket.on('connect', () => {
+    socket.destroy();
+    res.json({ success: true, message: 'Can reach smtp.gmail.com:587' });
+  });
+
+  socket.on('timeout', () => {
+    socket.destroy();
+    res.status(500).json({ success: false, error: 'Connection timeout' });
+  });
+
+  socket.on('error', (err) => {
+    socket.destroy();
+    res.status(500).json({ success: false, error: err.message });
+  });
+});
+
+// ==================== PASSWORD RESET ENDPOINTS ====================
 app.post('/api/auth/forgot-password', async (req, res) => {
   const { email } = req.body;
   if (!email) return res.status(400).json({ success: false, error: 'Email required' });
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   if (!emailRegex.test(email)) return res.status(400).json({ success: false, error: 'Invalid email' });
 
-  if (!adminAuth) {
-    return res.status(500).json({ success: false, error: 'Password reset service unavailable' });
-  }
-
-  // Check if the email exists in Firebase Authentication
-  try {
-    await adminAuth.getUserByEmail(email);
-  } catch (err) {
-    return res.status(404).json({ success: false, error: 'No account found with this email' });
+  if (adminAuth) {
+    try {
+      await adminAuth.getUserByEmail(email);
+    } catch (err) {
+      return res.status(404).json({ success: false, error: 'No account found with this email' });
+    }
   }
 
   const code = generateOTP();
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+  if (!supabase) return res.status(500).json({ success: false, error: 'Database error' });
 
-  if (!supabase) {
-    return res.status(500).json({ success: false, error: 'Database error' });
-  }
-
-  // Invalidate any previous unused OTPs for this email
   await supabase.from('password_resets').update({ used: true }).eq('email', email).eq('used', false);
-
   const { error } = await supabase.from('password_resets').insert([{
     email: email.toLowerCase(),
     code,
@@ -473,22 +314,23 @@ app.post('/api/auth/forgot-password', async (req, res) => {
   }]);
 
   if (error) {
-    console.error('Error saving OTP:', error);
+    console.error(error);
     return res.status(500).json({ success: false, error: 'Failed to save OTP' });
   }
 
-  await sendPasswordResetEmail(email, code);
-  res.json({ success: true, message: 'OTP sent to your email (also logged in server console).' });
+  try {
+    await sendPasswordResetEmail(email, code);
+    res.json({ success: true, message: 'OTP sent to your email' });
+  } catch (emailError) {
+    // If email fails, still return success to user (don't leak internal error), but log it
+    console.error('Email send failed, but OTP saved in DB:', emailError);
+    res.json({ success: true, message: 'If the email exists, an OTP has been sent.' });
+  }
 });
 
 app.post('/api/auth/verify-reset-otp', async (req, res) => {
   const { email, code } = req.body;
   if (!email || !code) return res.status(400).json({ success: false, error: 'Email and code required' });
-
-  if (!supabase) {
-    return res.status(500).json({ success: false, error: 'Database error' });
-  }
-
   const { data, error } = await supabase
     .from('password_resets')
     .select('*')
@@ -500,7 +342,6 @@ app.post('/api/auth/verify-reset-otp', async (req, res) => {
   if (error || !data) return res.status(400).json({ success: false, error: 'Invalid or expired OTP' });
   if (new Date(data.expires_at) < new Date()) return res.status(400).json({ success: false, error: 'OTP has expired' });
 
-  // Mark as used so it cannot be reused
   await supabase.from('password_resets').update({ used: true }).eq('id', data.id);
   res.json({ success: true, message: 'OTP verified' });
 });
@@ -509,24 +350,20 @@ app.post('/api/auth/reset-password', async (req, res) => {
   const { email, newPassword } = req.body;
   if (!email || !newPassword) return res.status(400).json({ success: false, error: 'Email and new password required' });
   if (newPassword.length < 6) return res.status(400).json({ success: false, error: 'Password must be at least 6 characters' });
-
-  if (!adminAuth) {
-    return res.status(500).json({ success: false, error: 'Password reset service unavailable' });
-  }
+  if (!adminAuth) return res.status(500).json({ success: false, error: 'Password reset service unavailable' });
 
   try {
     const userRecord = await adminAuth.getUserByEmail(email);
     await adminAuth.updateUser(userRecord.uid, { password: newPassword });
-    // Clean up all OTPs for this email after successful reset
     await supabase.from('password_resets').delete().eq('email', email.toLowerCase());
     res.json({ success: true, message: 'Password updated successfully. Please log in.' });
   } catch (err) {
-    console.error('Password reset error:', err);
+    console.error(err);
     res.status(500).json({ success: false, error: 'Failed to update password' });
   }
 });
 
-// ==================== TURNSTILE ====================
+// ==================== TURNSTILE ENDPOINTS ====================
 app.get('/api/turnstile/site-key', (req, res) => {
   res.json({ siteKey: CLOUDFLARE_SITE_KEY });
 });
@@ -567,12 +404,9 @@ app.post('/api/contact', async (req, res) => {
   if (supabase) {
     try {
       await supabase.from('contact_messages').insert([{
-        first_name: firstName.trim(),
-        last_name: lastName.trim(),
-        email: email.trim().toLowerCase(),
-        message: message.trim(),
-        support_type: supportType || null,
-        status: 'unread',
+        first_name: firstName.trim(), last_name: lastName.trim(),
+        email: email.trim().toLowerCase(), message: message.trim(),
+        support_type: supportType || null, status: 'unread',
         created_at: new Date().toISOString()
       }]);
     } catch (error) { console.error('Error saving contact message:', error); }
@@ -611,11 +445,8 @@ app.post('/api/support-tickets', strictLimiter, async (req, res) => {
 
   try {
     const { data, error } = await supabase.from('support_tickets').insert([{
-      name: name.trim(),
-      email: email.trim().toLowerCase(),
-      message: message.trim(),
-      status: 'open',
-      created_at: new Date().toISOString()
+      name: name.trim(), email: email.trim().toLowerCase(), message: message.trim(),
+      status: 'open', created_at: new Date().toISOString()
     }]).select();
     if (error) throw error;
     res.json({ success: true, ticket: data[0] });
@@ -645,18 +476,10 @@ app.post('/api/support-us', async (req, res) => {
 
   try {
     await supabase.from('support_inquiries').insert([{
-      first_name: firstName.trim(),
-      last_name: lastName.trim(),
-      email: email.trim().toLowerCase(),
-      phone: phone || null,
-      message: message || null,
-      interests: interests || [],
-      availability: availability || null,
-      organization: organization || null,
-      donation_amount: donationAmount || null,
-      support_type: supportType,
-      status: 'pending',
-      created_at: new Date().toISOString()
+      first_name: firstName.trim(), last_name: lastName.trim(), email: email.trim().toLowerCase(),
+      phone: phone || null, message: message || null, interests: interests || [], availability: availability || null,
+      organization: organization || null, donation_amount: donationAmount || null, support_type: supportType,
+      status: 'pending', created_at: new Date().toISOString()
     }]);
     res.json({ success: true, message: 'Thank you for your support! We will contact you soon.' });
   } catch (error) { res.status(500).json({ success: false, error: error.message }); }
@@ -763,7 +586,7 @@ app.post('/api/online/track', async (req, res) => {
     try {
       const userId = parseInt(Buffer.from(auth_token, 'base64').toString().split(':')[0]);
       const { data: user } = await supabase.from('app_users').select('id').eq('id', userId).single();
-      if (user) { authenticatedUserId = user.id; isAuthenticated = true; }
+      if (user) { authenticatedUserId = userId; isAuthenticated = true; }
     } catch (e) {}
   }
   if (!supabase) return res.json({ success: true, onlineCount: 0, users: [] });
@@ -1044,6 +867,5 @@ app.listen(PORT, () => {
   console.log(`📅 Events: http://localhost:${PORT}/api/events`);
   console.log(`👥 Online: http://localhost:${PORT}/api/online/count`);
   console.log(`👤 Users: http://localhost:${PORT}/api/users/count`);
-  console.log(`🔐 Turnstile: ${CLOUDFLARE_SITE_KEY ? 'Configured' : 'Not configured'}`);
-  console.log(`🔑 Password reset endpoints active (OTP logged to console).\n`);
+  console.log(`🔐 Turnstile: ${CLOUDFLARE_SITE_KEY ? 'Configured' : 'Not configured'}\n`);
 });
