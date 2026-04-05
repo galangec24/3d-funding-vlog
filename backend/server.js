@@ -8,9 +8,6 @@ import { getAuth as getAdminAuth } from 'firebase-admin/auth';
 import multer from 'multer';
 import { v2 as cloudinary } from 'cloudinary';
 import { CloudinaryStorage } from 'multer-storage-cloudinary';
-import * as brevo from '@getbrevo/brevo';
-
-const { TransactionalEmailsApi, SendSmtpEmail } = brevo;
 
 dotenv.config();
 
@@ -57,7 +54,7 @@ const avatarStorage = new CloudinaryStorage({
   cloudinary: cloudinary,
   params: (req, file) => ({
     folder: 'user_avatars',
-    public_id: `user_${req.user.uid}`,
+    public_id: `user_${req.user.uid}`,   // Fixed per user – overwrites previous
     overwrite: true,
     allowed_formats: ['jpg', 'jpeg', 'png', 'gif', 'webp'],
     transformation: [{ width: 400, height: 400, crop: 'limit' }],
@@ -65,39 +62,54 @@ const avatarStorage = new CloudinaryStorage({
 });
 const uploadAvatar = multer({
   storage: avatarStorage,
-  limits: { fileSize: 1 * 1024 * 1024 },
+  limits: { fileSize: 1 * 1024 * 1024 }, // 1MB
   fileFilter: (req, file, cb) => {
     if (file.mimetype.startsWith('image/')) cb(null, true);
     else cb(new Error('Only images are allowed'), false);
   },
 });
 
-// ==================== BREVO EMAIL API (NO SMTP) ====================
-let brevoApiInstance = null;
-if (process.env.BREVO_API_KEY) {
-  brevoApiInstance = new TransactionalEmailsApi();
-  brevoApiInstance.setApiKey(0, process.env.BREVO_API_KEY);
-  console.log('✅ Brevo API configured (HTTPS port 443)');
-} else {
-  console.warn('⚠️ BREVO_API_KEY missing – email features disabled');
-}
+// ==================== BREVO EMAIL API (DIRECT FETCH, NO SDK) ====================
+const BREVO_API_KEY = process.env.BREVO_API_KEY;
+const BREVO_SENDER_EMAIL = process.env.BREVO_SENDER_EMAIL || 'noreply@yourdomain.com';
+const BREVO_SENDER_NAME = process.env.BREVO_SENDER_NAME || 'Sound & Silence';
 
 async function sendEmailViaBrevo({ to, subject, htmlContent }) {
-  if (!brevoApiInstance) return false;
-  const sendSmtpEmail = new SendSmtpEmail();
-  sendSmtpEmail.subject = subject;
-  sendSmtpEmail.htmlContent = htmlContent;
-  sendSmtpEmail.sender = {
-    name: process.env.BREVO_SENDER_NAME || 'Sound & Silence',
-    email: process.env.BREVO_SENDER_EMAIL || 'noreply@yourdomain.com',
+  if (!BREVO_API_KEY) {
+    console.warn('⚠️ BREVO_API_KEY missing – email not sent');
+    return false;
+  }
+
+  const url = 'https://api.brevo.com/v3/smtp/email';
+  const payload = {
+    sender: { name: BREVO_SENDER_NAME, email: BREVO_SENDER_EMAIL },
+    to: [{ email: to }],
+    subject: subject,
+    htmlContent: htmlContent
   };
-  sendSmtpEmail.to = [{ email: to }];
+
   try {
-    await brevoApiInstance.sendTransacEmail(sendSmtpEmail);
-    console.log(`✅ Email sent to ${to}`);
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+        'api-key': BREVO_API_KEY
+      },
+      body: JSON.stringify(payload)
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`Brevo API error (${response.status}):`, errorText);
+      return false;
+    }
+
+    const data = await response.json();
+    console.log(`✅ Email sent to ${to}`, data.messageId);
     return true;
   } catch (error) {
-    console.error('Brevo email error:', error.response?.body || error);
+    console.error('Brevo fetch error:', error);
     return false;
   }
 }
@@ -248,12 +260,6 @@ async function sendPasswordResetEmail(email, code) {
   });
 }
 
-// ==================== DEBUG ENDPOINT (deprecated) ====================
-app.get('/api/debug/smtp-test', (req, res) => {
-  res.json({ success: true, message: 'SMTP test endpoint deprecated – using Brevo API' });
-});
-
-// ==================== PASSWORD RESET ENDPOINTS ====================
 app.post('/api/auth/forgot-password', async (req, res) => {
   const { email } = req.body;
   if (!email) return res.status(400).json({ success: false, error: 'Email required' });
@@ -284,14 +290,12 @@ app.post('/api/auth/forgot-password', async (req, res) => {
     return res.status(500).json({ success: false, error: 'Failed to save OTP' });
   }
 
-  try {
-    const sent = await sendPasswordResetEmail(email, code);
-    if (sent) res.json({ success: true, message: 'OTP sent to your email' });
-    else res.json({ success: true, message: 'If the email exists, an OTP has been sent.' });
-  } catch (emailError) {
-    console.error('Email send failed, but OTP saved in DB:', emailError);
-    res.json({ success: true, message: 'If the email exists, an OTP has been sent.' });
+  const sent = await sendPasswordResetEmail(email, code);
+  if (!sent) {
+    console.error('Failed to send password reset email');
+    // Still return success to avoid email enumeration
   }
+  res.json({ success: true, message: 'If the email exists, an OTP has been sent.' });
 });
 
 app.post('/api/auth/verify-reset-otp', async (req, res) => {
@@ -351,13 +355,13 @@ app.get('/api/health', (req, res) => {
     environment: process.env.NODE_ENV || 'development',
     supabase: supabaseAnon ? 'connected' : 'not configured',
     turnstile: CLOUDFLARE_SITE_KEY ? 'configured' : 'not configured',
-    brevo: brevoApiInstance ? 'configured' : 'not configured',
+    brevo: BREVO_API_KEY ? 'configured' : 'not configured',
     firebaseAdmin: adminAuth ? 'configured' : 'not configured',
     cloudinary: process.env.CLOUDINARY_CLOUD_NAME ? 'configured' : 'not configured'
   });
 });
 
-// ==================== AVATAR UPLOAD (CLOUDINARY) ====================
+// ==================== AVATAR UPLOAD ====================
 app.post(
   '/api/users/avatar',
   verifyFirebaseToken,
@@ -385,7 +389,7 @@ app.post(
   }
 );
 
-// ==================== EMAIL CHANGE WITH OTP (USING BREVO & SUPABASE) ====================
+// ==================== EMAIL CHANGE WITH OTP ====================
 // Ensure table exists: CREATE TABLE email_change_requests (user_uid TEXT PRIMARY KEY, new_email TEXT NOT NULL, otp_code TEXT NOT NULL, expires_at TIMESTAMP NOT NULL, created_at TIMESTAMP DEFAULT NOW());
 
 app.post('/api/auth/request-email-change', verifyFirebaseToken, async (req, res) => {
@@ -489,46 +493,22 @@ app.post('/api/auth/verify-email-change', verifyFirebaseToken, async (req, res) 
   }
 });
 
-// ==================== CONTACT FORM (using Brevo) ====================
+// ==================== CONTACT FORM ====================
 async function sendContactEmailToAdmin({ firstName, lastName, email, message, supportType }) {
-  if (!brevoApiInstance) return;
-  const adminEmail = process.env.ADMIN_EMAIL || process.env.BREVO_SENDER_EMAIL;
+  const adminEmail = process.env.ADMIN_EMAIL || BREVO_SENDER_EMAIL;
   if (!adminEmail) return;
   await sendEmailViaBrevo({
     to: adminEmail,
     subject: `New Contact Message from ${firstName} ${lastName}`,
-    htmlContent: `<div style="font-family: Arial, sans-serif;"><h2>New Contact Form Submission</h2><p><strong>Name:</strong> ${firstName} ${lastName}</p><p><strong>Email:</strong> ${email}</p><p><strong>Type:</strong> ${supportType || 'General'}</p><p><strong>Message:</strong></p><p>${message.replace(/\n/g, '<br>')}</p></div>`
+    htmlContent: `<div><h2>New Contact Form Submission</h2><p><strong>Name:</strong> ${firstName} ${lastName}</p><p><strong>Email:</strong> ${email}</p><p><strong>Type:</strong> ${supportType || 'General'}</p><p><strong>Message:</strong></p><p>${message.replace(/\n/g, '<br>')}</p></div>`
   });
 }
 
 async function sendAutoReplyToUser(email, firstName, userMessage) {
-  if (!brevoApiInstance) return;
   await sendEmailViaBrevo({
     to: email,
     subject: 'We received your message – Sound & Silence',
-    htmlContent: `<div style="font-family: Arial, sans-serif; max-width: 600px;"><h2>Hello ${firstName},</h2><p>Thank you for reaching out to Sound & Silence. We have received your message and will get back to you within 24 hours.</p><p><strong>Your message:</strong><br>${userMessage.replace(/\n/g, '<br>')}</p><p>In the meantime, feel free to explore our <a href="https://soundandsilence.com/events">upcoming events</a>.</p><hr><p style="font-size: 12px;">Sound & Silence – Science-based sober events</p></div>`
-  });
-}
-
-async function sendSupportTicketEmailToAdmin({ name, email, message }) {
-  if (!brevoApiInstance) return;
-  const adminEmail = process.env.ADMIN_EMAIL || process.env.BREVO_SENDER_EMAIL;
-  if (!adminEmail) return;
-  await sendEmailViaBrevo({
-    to: adminEmail,
-    subject: `New Support Ticket from ${name}`,
-    htmlContent: `<div style="font-family: Arial, sans-serif;"><h2>Support Ticket</h2><p><strong>Name:</strong> ${name}</p><p><strong>Email:</strong> ${email}</p><p><strong>Message:</strong></p><p>${message.replace(/\n/g, '<br>')}</p></div>`
-  });
-}
-
-async function sendSupportInquiryEmailToAdmin({ firstName, lastName, email, phone, message, supportType, organization, donationAmount }) {
-  if (!brevoApiInstance) return;
-  const adminEmail = process.env.ADMIN_EMAIL || process.env.BREVO_SENDER_EMAIL;
-  if (!adminEmail) return;
-  await sendEmailViaBrevo({
-    to: adminEmail,
-    subject: `New Support Inquiry: ${supportType || 'General'} from ${firstName} ${lastName}`,
-    htmlContent: `<div style="font-family: Arial, sans-serif;"><h2>Support Inquiry</h2><p><strong>Name:</strong> ${firstName} ${lastName}</p><p><strong>Email:</strong> ${email}</p><p><strong>Phone:</strong> ${phone || 'Not provided'}</p><p><strong>Organization:</strong> ${organization || 'Not provided'}</p><p><strong>Support Type:</strong> ${supportType || 'Not specified'}</p><p><strong>Donation Amount:</strong> ${donationAmount || 'Not specified'}</p><p><strong>Message:</strong></p><p>${message ? message.replace(/\n/g, '<br>') : 'No message provided'}</p></div>`
+    htmlContent: `<div><h2>Hello ${firstName},</h2><p>Thank you for reaching out. We will get back to you within 24 hours.</p><p><strong>Your message:</strong><br>${userMessage.replace(/\n/g, '<br>')}</p></div>`
   });
 }
 
@@ -550,7 +530,7 @@ app.post('/api/contact', async (req, res) => {
       created_at: new Date().toISOString()
     }]);
   } catch (error) { console.error('Error saving contact message:', error); }
-  res.json({ success: true, message: 'Message sent successfully! We\'ll get back to you soon.' });
+  res.json({ success: true, message: 'Message sent successfully!' });
 });
 
 app.get('/api/contact/messages', async (req, res) => {
@@ -562,6 +542,16 @@ app.get('/api/contact/messages', async (req, res) => {
 });
 
 // ==================== SUPPORT TICKETS ====================
+async function sendSupportTicketEmailToAdmin({ name, email, message }) {
+  const adminEmail = process.env.ADMIN_EMAIL || BREVO_SENDER_EMAIL;
+  if (!adminEmail) return;
+  await sendEmailViaBrevo({
+    to: adminEmail,
+    subject: `New Support Ticket from ${name}`,
+    htmlContent: `<div><h2>Support Ticket</h2><p><strong>Name:</strong> ${name}</p><p><strong>Email:</strong> ${email}</p><p><strong>Message:</strong></p><p>${message.replace(/\n/g, '<br>')}</p></div>`
+  });
+}
+
 app.get('/api/support-tickets', async (req, res) => {
   try {
     const { data, error } = await supabaseAnon.from('support_tickets').select('*').order('created_at', { ascending: false });
@@ -599,6 +589,16 @@ app.put('/api/support-tickets/:id', async (req, res) => {
 });
 
 // ==================== SUPPORT US ====================
+async function sendSupportInquiryEmailToAdmin({ firstName, lastName, email, phone, message, supportType, organization, donationAmount }) {
+  const adminEmail = process.env.ADMIN_EMAIL || BREVO_SENDER_EMAIL;
+  if (!adminEmail) return;
+  await sendEmailViaBrevo({
+    to: adminEmail,
+    subject: `New Support Inquiry: ${supportType || 'General'} from ${firstName} ${lastName}`,
+    htmlContent: `<div><h2>Support Inquiry</h2><p><strong>Name:</strong> ${firstName} ${lastName}</p><p><strong>Email:</strong> ${email}</p><p><strong>Phone:</strong> ${phone || 'Not provided'}</p><p><strong>Organization:</strong> ${organization || 'Not provided'}</p><p><strong>Type:</strong> ${supportType || 'Not specified'}</p><p><strong>Donation:</strong> ${donationAmount || 'Not specified'}</p><p><strong>Message:</strong></p><p>${message ? message.replace(/\n/g, '<br>') : 'No message provided'}</p></div>`
+  });
+}
+
 app.post('/api/support-us', async (req, res) => {
   const { firstName, lastName, email, phone, message, interests, availability, organization, donationAmount, supportType, turnstile_token } = req.body;
   if (!turnstile_token) return res.status(400).json({ success: false, error: 'Verification required' });
@@ -1171,7 +1171,7 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`\n🎵 Sound & Silence API running on port ${PORT}`);
   console.log(`📊 Health: http://localhost:${PORT}/api/health`);
-  console.log(`📧 Brevo Email: ${brevoApiInstance ? 'Configured (HTTPS)' : 'Not configured'}`);
+  console.log(`📧 Brevo Email: ${BREVO_API_KEY ? 'Configured (HTTPS)' : 'Not configured'}`);
   console.log(`🔐 Firebase Admin: ${adminAuth ? 'Configured' : 'Not configured'}`);
   console.log(`📋 Rate Limiting: Active`);
   console.log(`🎥 Vlogs: http://localhost:${PORT}/api/vlogs`);
