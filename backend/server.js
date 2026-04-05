@@ -834,38 +834,79 @@ app.delete('/api/events/:id', async (req, res) => {
 
 app.post('/api/events/:id/register', async (req, res) => {
   const { id } = req.params;
-  const { user_name, user_email, user_phone, special_requests, user_id, auth_token } = req.body;
-  if (!user_name || !user_email) return res.status(400).json({ success: false, error: 'Name and email required' });
-  if (!supabase) return res.json({ success: true });
+  const { user_name, user_email, user_phone, special_requests } = req.body;
+  const token = req.headers.authorization?.split('Bearer ')[1];
 
-  // Try to get user_id from auth_token if not provided
-  let finalUserId = user_id || null;
-  if (!finalUserId && auth_token) {
+  if (!user_name || !user_email) {
+    return res.status(400).json({ success: false, error: 'Name and email required' });
+  }
+
+  if (!supabase) {
+    return res.json({ success: true, registration: { id: Date.now() } });
+  }
+
+  // Get the authenticated user's ID from the token
+  let userId = null;
+  if (token) {
     try {
-      finalUserId = parseInt(Buffer.from(auth_token, 'base64').toString().split(':')[0]);
-    } catch (e) {}
+      const decoded = Buffer.from(token, 'base64').toString();
+      userId = parseInt(decoded.split(':')[0]);
+    } catch (err) {
+      console.error('Invalid token:', err);
+    }
   }
 
   try {
-    const { data: event } = await supabase.from('events').select('capacity, status').eq('id', id).single();
-    if (event.status !== 'upcoming') return res.status(400).json({ success: false, error: 'Event not open for registration' });
-    if (event.capacity) {
-      const { count } = await supabase.from('event_registrations').select('*', { count: 'exact', head: true }).eq('event_id', id);
-      if (count >= event.capacity) return res.status(400).json({ success: false, error: 'Event is full' });
+    // Check if the event exists and is upcoming
+    const { data: event, error: eventError } = await supabase
+      .from('events')
+      .select('capacity, status')
+      .eq('id', id)
+      .single();
+
+    if (eventError || !event) {
+      return res.status(404).json({ success: false, error: 'Event not found' });
     }
-    const { data, error } = await supabase.from('event_registrations').insert([{
+    if (event.status !== 'upcoming') {
+      return res.status(400).json({ success: false, error: 'Event is not open for registration' });
+    }
+
+    // Check capacity if set
+    if (event.capacity) {
+      const { count, error: countError } = await supabase
+        .from('event_registrations')
+        .select('*', { count: 'exact', head: true })
+        .eq('event_id', id);
+      if (countError) throw countError;
+      if (count >= event.capacity) {
+        return res.status(400).json({ success: false, error: 'Event is full' });
+      }
+    }
+
+    // Insert registration (prefer user_id if available, otherwise store name/email)
+    const insertData = {
       event_id: id,
       user_name: user_name.trim(),
       user_email: user_email.trim().toLowerCase(),
       user_phone: user_phone || null,
       special_requests: special_requests || null,
-      user_id: finalUserId,
-      status: 'pending',   // default status
-      registered_at: new Date().toISOString()
-    }]).select();
+      registered_at: new Date().toISOString(),
+      status: 'confirmed'
+    };
+    if (userId) {
+      insertData.user_id = userId;
+    }
+
+    const { data, error } = await supabase
+      .from('event_registrations')
+      .insert([insertData])
+      .select();
+
     if (error) throw error;
+
     res.json({ success: true, registration: data[0] });
   } catch (error) {
+    console.error('Registration error:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
