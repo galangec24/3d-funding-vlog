@@ -1009,16 +1009,44 @@ app.get('/api/events/:id/registrations', async (req, res) => {
   } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
 
+// Update registration status (accept/reject)
 app.put('/api/event-registrations/:id/status', async (req, res) => {
   const { id } = req.params;
-  const { status } = req.body;
-  if (!['pending', 'accepted', 'rejected'].includes(status)) return res.status(400).json({ success: false, error: 'Invalid status' });
-  if (!supabase) return res.status(500).json({ success: false, error: 'Database error' });
+  const { status } = req.body; // 'accepted', 'rejected', 'pending'
+  
+  if (!['pending', 'accepted', 'rejected'].includes(status)) {
+    return res.status(400).json({ success: false, error: 'Invalid status' });
+  }
+  if (!supabase) return res.status(500).json({ success: false, error: 'Database not configured' });
+  
   try {
-    const { error } = await supabase.from('event_registrations').update({ status, updated_at: new Date().toISOString() }).eq('id', id);
+    // First check if registration exists
+    const { data: existing, error: findError } = await supabase
+      .from('event_registrations')
+      .select('id')
+      .eq('id', id)
+      .single();
+      
+    if (findError || !existing) {
+      return res.status(404).json({ success: false, error: 'Registration not found' });
+    }
+    
+    // Update the status
+    const { error } = await supabase
+      .from('event_registrations')
+      .update({ 
+        status, 
+        updated_at: new Date().toISOString() 
+      })
+      .eq('id', id);
+      
     if (error) throw error;
+    
     res.json({ success: true });
-  } catch (error) { res.status(500).json({ success: false, error: error.message }); }
+  } catch (error) {
+    console.error('Error updating registration status:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
 // ==================== STATISTICS ====================
