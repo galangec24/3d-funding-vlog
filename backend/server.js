@@ -1003,35 +1003,54 @@ app.get('/api/events/:id/registrations', async (req, res) => {
   const { id } = req.params;
   if (!supabase) return res.status(500).json({ success: false, error: 'Database error' });
   try {
-    const { data, error } = await supabase.from('event_registrations').select('*').eq('event_id', id).order('registered_at', { ascending: false });
+    const { data, error } = await supabase
+      .from('event_registrations')
+      .select('*')
+      .eq('event_id', id)
+      .order('registered_at', { ascending: false });
     if (error) throw error;
     res.json({ success: true, registrations: data });
-  } catch (error) { res.status(500).json({ success: false, error: error.message }); }
+  } catch (error) {
+    console.error('Error fetching registrations:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
 // Update registration status (accept/reject)
 app.put('/api/event-registrations/:id/status', async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
+  
   if (!['pending', 'accepted', 'rejected'].includes(status)) {
     return res.status(400).json({ success: false, error: 'Invalid status' });
   }
-  if (!supabase) return res.status(500).json({ success: false, error: 'Database not configured' });
+  
+  if (!supabase) {
+    return res.status(500).json({ success: false, error: 'Database not configured' });
+  }
+  
   try {
-    // Check if registration exists
+    // First, check if registration exists
     const { data: existing, error: findError } = await supabase
       .from('event_registrations')
       .select('id')
       .eq('id', id)
       .single();
+    
     if (findError || !existing) {
       return res.status(404).json({ success: false, error: 'Registration not found' });
     }
+    
     const { error } = await supabase
       .from('event_registrations')
-      .update({ status, updated_at: new Date().toISOString() })
+      .update({ 
+        status, 
+        updated_at: new Date().toISOString() 
+      })
       .eq('id', id);
+    
     if (error) throw error;
+    
     res.json({ success: true });
   } catch (error) {
     console.error('Error updating registration status:', error);
