@@ -498,6 +498,67 @@ app.post('/api/support-us', async (req, res) => {
 });
 
 // ==================== USER AUTHENTICATION ====================
+
+app.get('/api/users/my-events', async (req, res) => {
+  console.log('🚀 /api/users/my-events hit');
+  const authHeader = req.headers.authorization;
+  console.log('📋 Authorization header:', authHeader ? 'present' : 'missing');
+  
+  const token = authHeader?.split('Bearer ')[1];
+  if (!token) {
+    console.log('❌ No token provided');
+    return res.json({ success: false, registrations: [], error: 'No token' });
+  }
+
+  try {
+    const decoded = await adminAuth.verifyIdToken(token);
+    const email = decoded.email;
+    console.log('✅ Token verified, email:', email);
+    
+    if (!email) {
+      console.log('❌ No email in token');
+      return res.json({ success: false, registrations: [] });
+    }
+
+    // Direct query by email (case-insensitive)
+    const { data, error } = await supabase
+      .from('event_registrations')
+      .select(`
+        id,
+        registered_at,
+        status,
+        events!inner (id, title, event_date, location, image_url)
+      `)
+      .ilike('user_email', email);  // case-insensitive match
+
+    if (error) {
+      console.error('❌ Supabase error:', error);
+      throw error;
+    }
+
+    console.log(`✅ Found ${data?.length || 0} registrations for ${email}`);
+    if (data && data.length > 0) {
+      console.log('📝 First registration:', JSON.stringify(data[0], null, 2));
+    }
+
+    const registrations = (data || []).map(reg => ({
+      id: reg.id,
+      registered_at: reg.registered_at,
+      status: reg.status || 'pending',
+      event_id: reg.events.id,
+      event_title: reg.events.title,
+      event_date: reg.events.event_date,
+      event_location: reg.events.location,
+      event_image: reg.events.image_url
+    }));
+
+    res.json({ success: true, registrations });
+  } catch (err) {
+    console.error('❌ Server error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.get('/api/auth/me', async (req, res) => {
   const token = req.headers.authorization?.split('Bearer ')[1];
   if (!token || !supabase) return res.json({ success: false, user: null });
@@ -574,68 +635,6 @@ app.get('/api/users/:id', async (req, res) => {
     const { data: user } = await supabase.from('app_users').select('id, name, nickname, location, bio, hobbies, music_genres, birth_date, gender').eq('id', id).single();
     res.json({ success: true, user });
   } catch (error) { res.status(500).json({ success: false, error: error.message }); }
-});
-
-// ==================== MY EVENTS (FIXED – FALLBACK TO EMAIL) ====================
-// ==================== MY EVENTS (DEBUG + FIX) ====================
-app.get('/api/users/my-events', async (req, res) => {
-  console.log('🚀 /api/users/my-events hit');
-  const authHeader = req.headers.authorization;
-  console.log('📋 Authorization header:', authHeader ? 'present' : 'missing');
-  
-  const token = authHeader?.split('Bearer ')[1];
-  if (!token) {
-    console.log('❌ No token provided');
-    return res.json({ success: false, registrations: [], error: 'No token' });
-  }
-
-  try {
-    const decoded = await adminAuth.verifyIdToken(token);
-    const email = decoded.email;
-    console.log('✅ Token verified, email:', email);
-    
-    if (!email) {
-      console.log('❌ No email in token');
-      return res.json({ success: false, registrations: [] });
-    }
-
-    // Direct query by email (case-insensitive)
-    const { data, error } = await supabase
-      .from('event_registrations')
-      .select(`
-        id,
-        registered_at,
-        status,
-        events!inner (id, title, event_date, location, image_url)
-      `)
-      .ilike('user_email', email);  // case-insensitive match
-
-    if (error) {
-      console.error('❌ Supabase error:', error);
-      throw error;
-    }
-
-    console.log(`✅ Found ${data?.length || 0} registrations for ${email}`);
-    if (data && data.length > 0) {
-      console.log('📝 First registration:', JSON.stringify(data[0], null, 2));
-    }
-
-    const registrations = (data || []).map(reg => ({
-      id: reg.id,
-      registered_at: reg.registered_at,
-      status: reg.status || 'pending',
-      event_id: reg.events.id,
-      event_title: reg.events.title,
-      event_date: reg.events.event_date,
-      event_location: reg.events.location,
-      event_image: reg.events.image_url
-    }));
-
-    res.json({ success: true, registrations });
-  } catch (err) {
-    console.error('❌ Server error:', err);
-    res.status(500).json({ success: false, error: err.message });
-  }
 });
 
 // ==================== ONLINE USERS ====================
