@@ -757,10 +757,33 @@ app.get('/api/events', async (req, res) => {
 app.get('/api/events/admin', async (req, res) => {
   if (!supabase) return res.json({ success: true, events: [] });
   try {
-    const { data, error } = await supabase.from('events').select('*').order('event_date', { ascending: false });
+    const { data: events, error } = await supabase
+      .from('events')
+      .select('*')
+      .order('event_date', { ascending: false });
     if (error) throw error;
-    res.json({ success: true, events: data || [] });
-  } catch (error) { res.status(500).json({ success: false, error: error.message }); }
+
+    // Get registration counts
+    const { data: counts, error: countError } = await supabase
+      .from('event_registrations')
+      .select('event_id');
+    
+    const countMap = {};
+    if (counts) {
+      counts.forEach(reg => {
+        countMap[reg.event_id] = (countMap[reg.event_id] || 0) + 1;
+      });
+    }
+
+    const eventsWithCount = events.map(event => ({
+      ...event,
+      registrations_count: countMap[event.id] || 0
+    }));
+
+    res.json({ success: true, events: eventsWithCount });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
 app.get('/api/events/:id', async (req, res) => {
