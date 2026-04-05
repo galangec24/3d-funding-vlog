@@ -1,4 +1,3 @@
-import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { createClient } from '@supabase/supabase-js';
@@ -8,7 +7,7 @@ import { getAuth as getAdminAuth } from 'firebase-admin/auth';
 import multer from 'multer';
 import { v2 as cloudinary } from 'cloudinary';
 import { CloudinaryStorage } from 'multer-storage-cloudinary';
-import brevo from '@getbrevo/brevo';
+import * as brevo from '@getbrevo/brevo';
 
 const { TransactionalEmailsApi, SendSmtpEmail } = brevo;
 
