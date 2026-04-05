@@ -3,14 +3,14 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import { createClient } from '@supabase/supabase-js';
 import rateLimit from 'express-rate-limit';
-import nodemailer from 'nodemailer';
 import admin from 'firebase-admin';
 import { getAuth as getAdminAuth } from 'firebase-admin/auth';
-import net from 'net';
 import multer from 'multer';
 import { v2 as cloudinary } from 'cloudinary';
 import { CloudinaryStorage } from 'multer-storage-cloudinary';
-import { TransactionalEmailsApi, SendSmtpEmail } from '@getbrevo/brevo';
+import brevo from '@getbrevo/brevo';
+
+const { TransactionalEmailsApi, SendSmtpEmail } = brevo;
 
 dotenv.config();
 
@@ -248,7 +248,7 @@ async function sendPasswordResetEmail(email, code) {
   });
 }
 
-// ==================== DEBUG SMTP (no longer used, kept for compatibility) ====================
+// ==================== DEBUG ENDPOINT (deprecated) ====================
 app.get('/api/debug/smtp-test', (req, res) => {
   res.json({ success: true, message: 'SMTP test endpoint deprecated – using Brevo API' });
 });
