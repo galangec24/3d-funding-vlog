@@ -577,24 +577,59 @@ app.get('/api/users/:id', async (req, res) => {
 });
 
 // ==================== MY EVENTS (FIXED – FALLBACK TO EMAIL) ====================
+// ==================== MY EVENTS (DEBUG + FIX) ====================
 app.get('/api/users/my-events', async (req, res) => {
-  const token = req.headers.authorization?.split('Bearer ')[1];
+  const authHeader = req.headers.authorization;
+  const token = authHeader?.split('Bearer ')[1];
+
+  console.log('=== MY EVENTS REQUEST ===');
+  console.log('Authorization header present:', !!authHeader);
+  console.log('Token present:', !!token);
+
   if (!token || !supabase) {
+    console.log('Missing token or supabase');
     return res.json({ success: false, registrations: [] });
   }
 
-  let userId = await getUserIdFromToken(token);
+  let userId = null;
   let userEmail = null;
 
-  // Also extract email from token for fallback
   try {
     const decoded = await adminAuth.verifyIdToken(token);
     userEmail = decoded.email;
+    const firebaseUid = decoded.uid;
+    console.log('Decoded token email:', userEmail);
+    console.log('Decoded token UID:', firebaseUid);
+
+    // Try to find user by firebase_uid first
+    const { data: userByUid } = await supabase
+      .from('app_users')
+      .select('id, email')
+      .eq('firebase_uid', firebaseUid)
+      .maybeSingle();
+    if (userByUid) {
+      userId = userByUid.id;
+      console.log('Found user by firebase_uid:', userId);
+    } else {
+      // Then try by email
+      const { data: userByEmail } = await supabase
+        .from('app_users')
+        .select('id, email')
+        .eq('email', userEmail)
+        .maybeSingle();
+      if (userByEmail) {
+        userId = userByEmail.id;
+        console.log('Found user by email:', userId);
+      } else {
+        console.log('No user found in app_users for this email');
+      }
+    }
   } catch (err) {
-    console.error('Token decode error:', err);
+    console.error('Token verification failed:', err.message);
+    return res.status(401).json({ success: false, error: 'Invalid token' });
   }
 
-  // Build query: match by user_id OR by user_email
+  // Query registrations: by user_id OR by user_email (case-insensitive)
   let query = supabase
     .from('event_registrations')
     .select(`
@@ -605,31 +640,40 @@ app.get('/api/users/my-events', async (req, res) => {
     `);
 
   if (userId) {
+    console.log('Querying by user_id:', userId);
     query = query.eq('user_id', userId);
   } else if (userEmail) {
-    query = query.eq('user_email', userEmail.toLowerCase());
+    console.log('Querying by user_email:', userEmail);
+    // Use ilike for case-insensitive match
+    query = query.ilike('user_email', userEmail);
   } else {
+    console.log('No user_id or email available');
     return res.json({ success: false, registrations: [] });
   }
 
-  try {
-    const { data, error } = await query;
-    if (error) throw error;
-    const registrations = (data || []).map(reg => ({
-      id: reg.id,
-      registered_at: reg.registered_at,
-      status: reg.status || 'pending',
-      event_id: reg.events.id,
-      event_title: reg.events.title,
-      event_date: reg.events.event_date,
-      event_location: reg.events.location,
-      event_image: reg.events.image_url
-    }));
-    res.json({ success: true, registrations });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ success: false, error: error.message });
+  const { data, error } = await query;
+  if (error) {
+    console.error('Supabase error:', error);
+    return res.status(500).json({ success: false, error: error.message });
   }
+
+  console.log(`Found ${data?.length || 0} registrations`);
+  if (data?.length > 0) {
+    console.log('First registration:', data[0]);
+  }
+
+  const registrations = (data || []).map(reg => ({
+    id: reg.id,
+    registered_at: reg.registered_at,
+    status: reg.status || 'pending',
+    event_id: reg.events.id,
+    event_title: reg.events.title,
+    event_date: reg.events.event_date,
+    event_location: reg.events.location,
+    event_image: reg.events.image_url
+  }));
+
+  res.json({ success: true, registrations });
 });
 
 // ==================== ONLINE USERS ====================
