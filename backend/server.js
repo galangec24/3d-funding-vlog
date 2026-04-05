@@ -7,7 +7,9 @@ import nodemailer from 'nodemailer';
 import admin from 'firebase-admin';
 import { getAuth as getAdminAuth } from 'firebase-admin/auth';
 import net from 'net';
-import { body, param, validationResult } from 'express-validator';
+import multer from 'multer';
+import { v2 as cloudinary } from 'cloudinary';
+import { CloudinaryStorage } from 'multer-storage-cloudinary';
 
 dotenv.config();
 
@@ -39,12 +41,33 @@ const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseAnonKey = process.env.SUPABASE_ANON_KEY;
 const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-// Public client (subject to RLS, used for endpoints that need user context)
 const supabaseAnon = createClient(supabaseUrl, supabaseAnonKey);
-// Admin client (bypasses RLS, used only for admin operations)
 const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
-
 console.log('✅ Supabase clients initialized (anon + admin)');
+
+// ==================== CLOUDINARY CONFIGURATION ====================
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
+const avatarStorage = new CloudinaryStorage({
+  cloudinary: cloudinary,
+  params: {
+    folder: 'user_avatars',
+    allowed_formats: ['jpg', 'jpeg', 'png', 'gif', 'webp'],
+    transformation: [{ width: 400, height: 400, crop: 'limit' }],
+  },
+});
+const uploadAvatar = multer({
+  storage: avatarStorage,
+  limits: { fileSize: 1 * 1024 * 1024 }, // 1MB
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith('image/')) cb(null, true);
+    else cb(new Error('Only images are allowed'), false);
+  },
+});
 
 // ==================== CLOUDFLARE TURNSTILE ====================
 const CLOUDFLARE_SECRET_KEY = process.env.CLOUDFLARE_SECRET_KEY || '';
@@ -91,6 +114,23 @@ try {
   console.warn('⚠️ Firebase Admin init error:', err.message);
 }
 
+// ==================== MIDDLEWARE: VERIFY FIREBASE TOKEN ====================
+const verifyFirebaseToken = async (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  const token = authHeader?.split('Bearer ')[1];
+  if (!token || !adminAuth) {
+    return res.status(401).json({ success: false, error: 'Unauthorized: No token provided' });
+  }
+  try {
+    const decoded = await adminAuth.verifyIdToken(token);
+    req.user = decoded;
+    next();
+  } catch (err) {
+    console.error('Token verification error:', err);
+    return res.status(401).json({ success: false, error: 'Invalid token' });
+  }
+};
+
 // ==================== ADMIN AUTHENTICATION MIDDLEWARE ====================
 const verifyAdminToken = async (req, res, next) => {
   const authHeader = req.headers.authorization;
@@ -102,7 +142,6 @@ const verifyAdminToken = async (req, res, next) => {
   
   try {
     const decoded = await adminAuth.verifyIdToken(token);
-    // Check if email is admin (you can also check custom claims)
     const adminEmails = (process.env.ADMIN_EMAILS || '').split(',').map(e => e.trim().toLowerCase());
     if (!adminEmails.includes(decoded.email?.toLowerCase())) {
       return res.status(403).json({ success: false, error: 'Forbidden: Admin access required' });
@@ -121,14 +160,12 @@ async function getUserIdFromToken(token) {
   try {
     const decoded = await adminAuth.verifyIdToken(token);
     const email = decoded.email;
-    // First try by firebase_uid
     const { data: userByUid } = await supabaseAnon
       .from('app_users')
       .select('id')
       .eq('firebase_uid', decoded.uid)
       .maybeSingle();
     if (userByUid) return userByUid.id;
-    // Then try by email
     if (email) {
       const { data: userByEmail } = await supabaseAnon
         .from('app_users')
@@ -191,7 +228,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// ==================== EMAIL FUNCTIONS (unchanged) ====================
+// ==================== EMAIL FUNCTIONS ====================
 async function sendContactEmailToAdmin({ firstName, lastName, email, message, supportType }) {
   if (!emailTransporter) return;
   const mailOptions = {
@@ -256,7 +293,7 @@ async function sendSupportInquiryEmailToAdmin({ firstName, lastName, email, phon
   }
 }
 
-// ==================== PASSWORD RESET (unchanged) ====================
+// ==================== PASSWORD RESET ====================
 function generateOTP() {
   return Math.floor(100000 + Math.random() * 900000).toString();
 }
@@ -278,7 +315,7 @@ async function sendPasswordResetEmail(email, code) {
   }
 }
 
-// ==================== DEBUG SMTP ENDPOINT ====================
+// ==================== DEBUG SMTP ====================
 app.get('/api/debug/smtp-test', (req, res) => {
   const socket = net.createConnection(587, 'smtp.gmail.com');
   socket.setTimeout(5000);
@@ -287,7 +324,7 @@ app.get('/api/debug/smtp-test', (req, res) => {
   socket.on('error', (err) => { socket.destroy(); res.status(500).json({ success: false, error: err.message }); });
 });
 
-// ==================== PASSWORD RESET ENDPOINTS (use supabaseAnon) ====================
+// ==================== PASSWORD RESET ENDPOINTS ====================
 app.post('/api/auth/forgot-password', async (req, res) => {
   const { email } = req.body;
   if (!email) return res.status(400).json({ success: false, error: 'Email required' });
@@ -385,11 +422,40 @@ app.get('/api/health', (req, res) => {
     supabase: supabaseAnon ? 'connected' : 'not configured',
     turnstile: CLOUDFLARE_SITE_KEY ? 'configured' : 'not configured',
     email: emailTransporter ? 'configured' : 'not configured',
-    firebaseAdmin: adminAuth ? 'configured' : 'not configured'
+    firebaseAdmin: adminAuth ? 'configured' : 'not configured',
+    cloudinary: process.env.CLOUDINARY_CLOUD_NAME ? 'configured' : 'not configured'
   });
 });
 
-// ==================== CONTACT FORM (use supabaseAnon) ====================
+// ==================== AVATAR UPLOAD (CLOUDINARY) ====================
+app.post(
+  '/api/users/avatar',
+  verifyFirebaseToken,
+  uploadAvatar.single('avatar'),
+  async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ success: false, error: 'No file uploaded' });
+      }
+      const avatarUrl = req.file.path; // Cloudinary secure URL
+      const { uid } = req.user;
+
+      const { error } = await supabaseAdmin
+        .from('app_users')
+        .update({ avatar_url: avatarUrl, updated_at: new Date().toISOString() })
+        .eq('firebase_uid', uid);
+
+      if (error) throw error;
+
+      res.json({ success: true, avatarUrl });
+    } catch (error) {
+      console.error('Avatar upload error:', error);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+);
+
+// ==================== CONTACT FORM ====================
 app.post('/api/contact', async (req, res) => {
   const { firstName, lastName, email, message, turnstile_token, supportType } = req.body;
   if (!turnstile_token) return res.status(400).json({ success: false, error: 'Verification required' });
@@ -419,7 +485,7 @@ app.get('/api/contact/messages', async (req, res) => {
   } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
 
-// ==================== SUPPORT TICKETS (use supabaseAnon) ====================
+// ==================== SUPPORT TICKETS ====================
 app.get('/api/support-tickets', async (req, res) => {
   try {
     const { data, error } = await supabaseAnon.from('support_tickets').select('*').order('created_at', { ascending: false });
@@ -456,7 +522,7 @@ app.put('/api/support-tickets/:id', async (req, res) => {
   } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
 
-// ==================== SUPPORT US (use supabaseAnon) ====================
+// ==================== SUPPORT US ====================
 app.post('/api/support-us', async (req, res) => {
   const { firstName, lastName, email, phone, message, interests, availability, organization, donationAmount, supportType, turnstile_token } = req.body;
   if (!turnstile_token) return res.status(400).json({ success: false, error: 'Verification required' });
@@ -477,7 +543,7 @@ app.post('/api/support-us', async (req, res) => {
   } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
 
-// ==================== USER AUTHENTICATION (use supabaseAnon) ====================
+// ==================== USER AUTHENTICATION ====================
 app.get('/api/users/my-events', async (req, res) => {
   const authHeader = req.headers.authorization;
   const token = authHeader?.split('Bearer ')[1];
@@ -523,7 +589,7 @@ app.get('/api/auth/me', async (req, res) => {
   if (!token) return res.json({ success: false, user: null });
   try {
     const userId = parseInt(Buffer.from(token, 'base64').toString().split(':')[0]);
-    const { data: user } = await supabaseAnon.from('app_users').select('id, email, name, user_type, nickname, hobbies, music_genres, location, bio, birth_date, gender').eq('id', userId).single();
+    const { data: user } = await supabaseAnon.from('app_users').select('id, email, name, user_type, nickname, hobbies, music_genres, location, bio, birth_date, gender, avatar_url').eq('id', userId).single();
     res.json({ success: true, user: user || null });
   } catch (error) { res.json({ success: false, user: null }); }
 });
@@ -548,7 +614,7 @@ app.put('/api/users/:id', async (req, res) => {
   }
 });
 
-// ==================== USER STATISTICS (use supabaseAnon) ====================
+// ==================== USER STATISTICS ====================
 app.get('/api/users/count', async (req, res) => {
   try {
     const { count, error } = await supabaseAnon.from('app_users').select('*', { count: 'exact', head: true });
@@ -587,12 +653,12 @@ app.get('/api/users/stats/age', async (req, res) => {
 app.get('/api/users/:id', async (req, res) => {
   const { id } = req.params;
   try {
-    const { data: user } = await supabaseAnon.from('app_users').select('id, name, nickname, location, bio, hobbies, music_genres, birth_date, gender').eq('id', id).single();
+    const { data: user } = await supabaseAnon.from('app_users').select('id, name, nickname, location, bio, hobbies, music_genres, birth_date, gender, avatar_url').eq('id', id).single();
     res.json({ success: true, user });
   } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
 
-// ==================== ONLINE USERS (use supabaseAnon) ====================
+// ==================== ONLINE USERS ====================
 app.post('/api/online/track', async (req, res) => {
   const { session_id, user_name, user_id, current_page, user_agent, auth_token } = req.body;
   if (!session_id) return res.status(400).json({ success: false, error: 'Session ID required' });
@@ -632,7 +698,7 @@ app.get('/api/online/count', async (req, res) => {
   } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
 
-// ==================== VLOGS (use supabaseAnon for reads, supabaseAdmin for writes) ====================
+// ==================== VLOGS ====================
 app.get('/api/vlogs', async (req, res) => {
   try {
     const { data, error } = await supabaseAnon.from('vlog_entries').select('*').order('created_at', { ascending: false });
@@ -673,7 +739,7 @@ app.delete('/api/vlogs/:id', async (req, res) => {
   } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
 
-// ==================== BLOG POSTS (public reads: supabaseAnon, writes: supabaseAdmin) ====================
+// ==================== BLOG POSTS ====================
 app.get('/api/blog/posts', async (req, res) => {
   try {
     const { data, error } = await supabaseAnon.from('blog_posts').select('*').eq('status', 'published').order('published_at', { ascending: false });
@@ -693,7 +759,6 @@ app.get('/api/blog/admin/posts', async (req, res) => {
 app.get('/api/blog/posts/:id', async (req, res) => {
   const { id } = req.params;
   try {
-    // Increment view count using admin client (or use RPC)
     await supabaseAdmin.rpc('increment_blog_view', { post_id: parseInt(id) });
     const { data, error } = await supabaseAnon.from('blog_posts').select('*').eq('id', id).single();
     if (error) throw error;
@@ -739,7 +804,7 @@ app.delete('/api/blog/posts/:id', async (req, res) => {
   } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
 
-// ==================== EVENTS (public reads: supabaseAnon, admin writes: supabaseAdmin) ====================
+// ==================== EVENTS ====================
 app.get('/api/events', async (req, res) => {
   try {
     const { data, error } = await supabaseAnon.from('events').select('*').eq('status', 'upcoming').order('event_date', { ascending: true });
@@ -802,7 +867,7 @@ app.delete('/api/events/:id', async (req, res) => {
   } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
 
-// ==================== REGISTRATION (public – uses supabaseAnon with RLS) ====================
+// ==================== REGISTRATION (PUBLIC) ====================
 app.post('/api/events/:id/register', async (req, res) => {
   const { id } = req.params;
   const { user_name, user_email, user_phone, special_requests } = req.body;
@@ -812,7 +877,6 @@ app.post('/api/events/:id/register', async (req, res) => {
     return res.status(400).json({ success: false, error: 'Name and email required' });
   }
 
-  // Get user ID from Firebase token if available
   let userId = null;
   let firebaseUid = null;
 
@@ -872,7 +936,6 @@ app.post('/api/events/:id/register', async (req, res) => {
     if (userByEmail) userId = userByEmail.id;
   }
 
-  // Duplicate check
   let duplicateQuery = supabaseAnon
     .from('event_registrations')
     .select('id, status')
@@ -932,7 +995,7 @@ app.post('/api/events/:id/register', async (req, res) => {
   }
 });
 
-// ==================== REGISTRATION MANAGEMENT (ADMIN) – uses supabaseAdmin to bypass RLS ====================
+// ==================== REGISTRATION MANAGEMENT (ADMIN) ====================
 app.get('/api/events/:id/registrations', async (req, res) => {
   const { id } = req.params;
   try {
@@ -949,7 +1012,6 @@ app.get('/api/events/:id/registrations', async (req, res) => {
   }
 });
 
-// FIXED: Update registration status with proper row check
 app.put('/api/event-registrations/:id/status', async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
@@ -959,7 +1021,6 @@ app.put('/api/event-registrations/:id/status', async (req, res) => {
   }
 
   try {
-    // First verify the registration exists (optional but good for logging)
     const { data: existing, error: findError } = await supabaseAdmin
       .from('event_registrations')
       .select('id')
@@ -976,7 +1037,6 @@ app.put('/api/event-registrations/:id/status', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Registration not found' });
     }
 
-    // Perform update and return the updated row
     const { data: updated, error } = await supabaseAdmin
       .from('event_registrations')
       .update({ 
@@ -1001,7 +1061,7 @@ app.put('/api/event-registrations/:id/status', async (req, res) => {
   }
 });
 
-// ==================== STATISTICS (use supabaseAnon for counts) ====================
+// ==================== STATISTICS ====================
 app.get('/api/stats', async (req, res) => {
   let totalTickets = 0, totalVlogs = 0, totalBlogs = 0;
   try {
@@ -1031,7 +1091,7 @@ app.use((err, req, res, next) => {
   res.status(500).json({ success: false, error: 'Internal server error' });
 });
 
-// Start server
+// ==================== START SERVER ====================
 app.listen(PORT, () => {
   console.log(`\n🎵 Sound & Silence API running on port ${PORT}`);
   console.log(`📊 Health: http://localhost:${PORT}/api/health`);
@@ -1045,5 +1105,6 @@ app.listen(PORT, () => {
   console.log(`👥 Online: http://localhost:${PORT}/api/online/count`);
   console.log(`👤 Users: http://localhost:${PORT}/api/users/count`);
   console.log(`🔐 Turnstile: ${CLOUDFLARE_SITE_KEY ? 'Configured' : 'Not configured'}`);
+  console.log(`🖼️ Cloudinary: ${process.env.CLOUDINARY_CLOUD_NAME ? 'Configured' : 'Not configured'}`);
   console.log(`🛡️ Admin routes use service_role key to bypass RLS`);
 });
