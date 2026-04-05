@@ -567,16 +567,23 @@ app.get('/api/users/:id', async (req, res) => {
 app.get('/api/users/my-events', async (req, res) => {
   const token = req.headers.authorization?.split('Bearer ')[1];
   if (!token || !supabase) return res.json({ success: false, registrations: [] });
+
   try {
     const userId = parseInt(Buffer.from(token, 'base64').toString().split(':')[0]);
     const { data, error } = await supabase
       .from('event_registrations')
-      .select(`id, registered_at, events!inner (id, title, event_date, location, image_url)`)
+      .select(`
+        id,
+        registered_at,
+        status,
+        events!inner (id, title, event_date, location, image_url)
+      `)
       .eq('user_id', userId);
     if (error) throw error;
     const registrations = (data || []).map(reg => ({
       id: reg.id,
       registered_at: reg.registered_at,
+      status: reg.status || 'pending',
       event_id: reg.events.id,
       event_title: reg.events.title,
       event_date: reg.events.event_date,
@@ -584,7 +591,10 @@ app.get('/api/users/my-events', async (req, res) => {
       event_image: reg.events.image_url
     }));
     res.json({ success: true, registrations });
-  } catch (error) { res.status(500).json({ success: false, error: error.message }); }
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
 // ==================== ONLINE USERS ====================
@@ -891,7 +901,7 @@ app.post('/api/events/:id/register', async (req, res) => {
       user_phone: user_phone || null,
       special_requests: special_requests || null,
       registered_at: new Date().toISOString(),
-      status: 'confirmed'
+      status: 'pending'
     };
     if (userId) {
       insertData.user_id = userId;
