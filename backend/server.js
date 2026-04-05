@@ -10,6 +10,7 @@ import net from 'net';
 import multer from 'multer';
 import { v2 as cloudinary } from 'cloudinary';
 import { CloudinaryStorage } from 'multer-storage-cloudinary';
+import { TransactionalEmailsApi, SendSmtpEmail } from '@getbrevo/brevo';
 
 dotenv.config();
 
@@ -45,7 +46,7 @@ const supabaseAnon = createClient(supabaseUrl, supabaseAnonKey);
 const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
 console.log('✅ Supabase clients initialized (anon + admin)');
 
-// ==================== CLOUDINARY CONFIGURATION ====================
+// ==================== CLOUDINARY CONFIGURATION (OVERWRITE ENABLED) ====================
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
@@ -54,48 +55,56 @@ cloudinary.config({
 
 const avatarStorage = new CloudinaryStorage({
   cloudinary: cloudinary,
-  params: {
+  params: (req, file) => ({
     folder: 'user_avatars',
+    public_id: `user_${req.user.uid}`,
+    overwrite: true,
     allowed_formats: ['jpg', 'jpeg', 'png', 'gif', 'webp'],
     transformation: [{ width: 400, height: 400, crop: 'limit' }],
-  },
+  }),
 });
 const uploadAvatar = multer({
   storage: avatarStorage,
-  limits: { fileSize: 1 * 1024 * 1024 }, // 1MB
+  limits: { fileSize: 1 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     if (file.mimetype.startsWith('image/')) cb(null, true);
     else cb(new Error('Only images are allowed'), false);
   },
 });
 
+// ==================== BREVO EMAIL API (NO SMTP) ====================
+let brevoApiInstance = null;
+if (process.env.BREVO_API_KEY) {
+  brevoApiInstance = new TransactionalEmailsApi();
+  brevoApiInstance.setApiKey(0, process.env.BREVO_API_KEY);
+  console.log('✅ Brevo API configured (HTTPS port 443)');
+} else {
+  console.warn('⚠️ BREVO_API_KEY missing – email features disabled');
+}
+
+async function sendEmailViaBrevo({ to, subject, htmlContent }) {
+  if (!brevoApiInstance) return false;
+  const sendSmtpEmail = new SendSmtpEmail();
+  sendSmtpEmail.subject = subject;
+  sendSmtpEmail.htmlContent = htmlContent;
+  sendSmtpEmail.sender = {
+    name: process.env.BREVO_SENDER_NAME || 'Sound & Silence',
+    email: process.env.BREVO_SENDER_EMAIL || 'noreply@yourdomain.com',
+  };
+  sendSmtpEmail.to = [{ email: to }];
+  try {
+    await brevoApiInstance.sendTransacEmail(sendSmtpEmail);
+    console.log(`✅ Email sent to ${to}`);
+    return true;
+  } catch (error) {
+    console.error('Brevo email error:', error.response?.body || error);
+    return false;
+  }
+}
+
 // ==================== CLOUDFLARE TURNSTILE ====================
 const CLOUDFLARE_SECRET_KEY = process.env.CLOUDFLARE_SECRET_KEY || '';
 const CLOUDFLARE_SITE_KEY = process.env.CLOUDFLARE_SITE_KEY || '';
-
-// ==================== EMAIL CONFIGURATION ====================
-let emailTransporter = null;
-try {
-  if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
-    emailTransporter = nodemailer.createTransport({
-      host: 'smtp.gmail.com',
-      port: 587,
-      secure: false,
-      auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS,
-      },
-      connectionTimeout: 10000,
-      greetingTimeout: 10000,
-      socketTimeout: 15000,
-    });
-    console.log('✅ Email service configured');
-  } else {
-    console.log('⚠️ Email credentials not set - email features disabled');
-  }
-} catch (error) {
-  console.log('⚠️ Email service not configured:', error.message);
-}
 
 // ==================== FIREBASE ADMIN SDK ====================
 let adminAuth = null;
@@ -135,11 +144,9 @@ const verifyFirebaseToken = async (req, res, next) => {
 const verifyAdminToken = async (req, res, next) => {
   const authHeader = req.headers.authorization;
   const token = authHeader?.split('Bearer ')[1];
-  
   if (!token || !adminAuth) {
     return res.status(401).json({ success: false, error: 'Unauthorized: No token provided' });
   }
-  
   try {
     const decoded = await adminAuth.verifyIdToken(token);
     const adminEmails = (process.env.ADMIN_EMAILS || '').split(',').map(e => e.trim().toLowerCase());
@@ -228,100 +235,22 @@ app.use((req, res, next) => {
   next();
 });
 
-// ==================== EMAIL FUNCTIONS ====================
-async function sendContactEmailToAdmin({ firstName, lastName, email, message, supportType }) {
-  if (!emailTransporter) return;
-  const mailOptions = {
-    from: process.env.EMAIL_USER,
-    to: process.env.ADMIN_EMAIL || process.env.EMAIL_USER,
-    subject: `New Contact Message from ${firstName} ${lastName}`,
-    html: `<div style="font-family: Arial, sans-serif; max-width: 600px;"><h2>New Contact Form Submission</h2><p><strong>Name:</strong> ${firstName} ${lastName}</p><p><strong>Email:</strong> ${email}</p><p><strong>Type:</strong> ${supportType || 'General'}</p><p><strong>Message:</strong></p><p>${message.replace(/\n/g, '<br>')}</p></div>`
-  };
-  try {
-    await emailTransporter.sendMail(mailOptions);
-    console.log('✅ Admin contact email sent');
-  } catch (error) {
-    console.error('❌ Failed to send admin contact email:', error);
-  }
-}
-
-async function sendAutoReplyToUser(email, firstName, userMessage) {
-  if (!emailTransporter) return;
-  const mailOptions = {
-    from: process.env.EMAIL_USER,
-    to: email,
-    subject: 'We received your message – Sound & Silence',
-    html: `<div style="font-family: Arial, sans-serif; max-width: 600px;"><h2>Hello ${firstName},</h2><p>Thank you for reaching out to Sound & Silence. We have received your message and will get back to you within 24 hours.</p><p><strong>Your message:</strong><br>${userMessage.replace(/\n/g, '<br>')}</p><p>In the meantime, feel free to explore our <a href="https://soundandsilence.com/events">upcoming events</a>.</p><hr><p style="font-size: 12px;">Sound & Silence – Science-based sober events</p></div>`
-  };
-  try {
-    await emailTransporter.sendMail(mailOptions);
-    console.log('✅ Auto-reply sent to', email);
-  } catch (error) {
-    console.error('❌ Failed to send auto-reply:', error);
-  }
-}
-
-async function sendSupportTicketEmailToAdmin({ name, email, message }) {
-  if (!emailTransporter) return;
-  const mailOptions = {
-    from: process.env.EMAIL_USER,
-    to: process.env.ADMIN_EMAIL || process.env.EMAIL_USER,
-    subject: `New Support Ticket from ${name}`,
-    html: `<div style="font-family: Arial, sans-serif;"><h2>Support Ticket</h2><p><strong>Name:</strong> ${name}</p><p><strong>Email:</strong> ${email}</p><p><strong>Message:</strong></p><p>${message.replace(/\n/g, '<br>')}</p></div>`
-  };
-  try {
-    await emailTransporter.sendMail(mailOptions);
-    console.log('✅ Support ticket email sent to admin');
-  } catch (error) {
-    console.error('❌ Failed to send support ticket email:', error);
-  }
-}
-
-async function sendSupportInquiryEmailToAdmin({ firstName, lastName, email, phone, message, supportType, organization, donationAmount }) {
-  if (!emailTransporter) return;
-  const mailOptions = {
-    from: process.env.EMAIL_USER,
-    to: process.env.ADMIN_EMAIL || process.env.EMAIL_USER,
-    subject: `New Support Inquiry: ${supportType || 'General'} from ${firstName} ${lastName}`,
-    html: `<div style="font-family: Arial, sans-serif;"><h2>Support Inquiry</h2><p><strong>Name:</strong> ${firstName} ${lastName}</p><p><strong>Email:</strong> ${email}</p><p><strong>Phone:</strong> ${phone || 'Not provided'}</p><p><strong>Organization:</strong> ${organization || 'Not provided'}</p><p><strong>Support Type:</strong> ${supportType || 'Not specified'}</p><p><strong>Donation Amount:</strong> ${donationAmount || 'Not specified'}</p><p><strong>Message:</strong></p><p>${message ? message.replace(/\n/g, '<br>') : 'No message provided'}</p></div>`
-  };
-  try {
-    await emailTransporter.sendMail(mailOptions);
-    console.log('✅ Support inquiry email sent to admin');
-  } catch (error) {
-    console.error('❌ Failed to send support inquiry email:', error);
-  }
-}
-
-// ==================== PASSWORD RESET ====================
+// ==================== PASSWORD RESET (using Brevo) ====================
 function generateOTP() {
   return Math.floor(100000 + Math.random() * 900000).toString();
 }
 
 async function sendPasswordResetEmail(email, code) {
-  if (!emailTransporter) return;
-  const mailOptions = {
-    from: process.env.EMAIL_USER,
+  return sendEmailViaBrevo({
     to: email,
     subject: 'Sound & Silence – Password Reset OTP',
-    html: `<div style="font-family: Arial, sans-serif; max-width: 600px; padding: 20px;"><h2>Reset Your Password</h2><p>Use the following OTP to reset your password. It expires in 10 minutes.</p><div style="font-size: 32px; font-weight: bold; background: #f3f4f6; padding: 15px; text-align: center; border-radius: 8px;">${code}</div><p>If you did not request this, please ignore this email.</p><hr><p style="font-size: 12px; color: #6b7280;">Sound & Silence – Science-based sober events</p></div>`
-  };
-  try {
-    await emailTransporter.sendMail(mailOptions);
-    console.log('✅ Password reset OTP sent to', email);
-  } catch (error) {
-    console.error('❌ Failed to send password reset OTP:', error);
-    throw error;
-  }
+    htmlContent: `<div style="font-family: Arial, sans-serif; max-width: 600px; padding: 20px;"><h2>Reset Your Password</h2><p>Use the following OTP to reset your password. It expires in 10 minutes.</p><div style="font-size: 32px; font-weight: bold; background: #f3f4f6; padding: 15px; text-align: center; border-radius: 8px;">${code}</div><p>If you did not request this, please ignore this email.</p><hr><p style="font-size: 12px; color: #6b7280;">Sound & Silence – Science-based sober events</p></div>`
+  });
 }
 
-// ==================== DEBUG SMTP ====================
+// ==================== DEBUG SMTP (no longer used, kept for compatibility) ====================
 app.get('/api/debug/smtp-test', (req, res) => {
-  const socket = net.createConnection(587, 'smtp.gmail.com');
-  socket.setTimeout(5000);
-  socket.on('connect', () => { socket.destroy(); res.json({ success: true, message: 'Can reach smtp.gmail.com:587' }); });
-  socket.on('timeout', () => { socket.destroy(); res.status(500).json({ success: false, error: 'Connection timeout' }); });
-  socket.on('error', (err) => { socket.destroy(); res.status(500).json({ success: false, error: err.message }); });
+  res.json({ success: true, message: 'SMTP test endpoint deprecated – using Brevo API' });
 });
 
 // ==================== PASSWORD RESET ENDPOINTS ====================
@@ -356,8 +285,9 @@ app.post('/api/auth/forgot-password', async (req, res) => {
   }
 
   try {
-    await sendPasswordResetEmail(email, code);
-    res.json({ success: true, message: 'OTP sent to your email' });
+    const sent = await sendPasswordResetEmail(email, code);
+    if (sent) res.json({ success: true, message: 'OTP sent to your email' });
+    else res.json({ success: true, message: 'If the email exists, an OTP has been sent.' });
   } catch (emailError) {
     console.error('Email send failed, but OTP saved in DB:', emailError);
     res.json({ success: true, message: 'If the email exists, an OTP has been sent.' });
@@ -421,7 +351,7 @@ app.get('/api/health', (req, res) => {
     environment: process.env.NODE_ENV || 'development',
     supabase: supabaseAnon ? 'connected' : 'not configured',
     turnstile: CLOUDFLARE_SITE_KEY ? 'configured' : 'not configured',
-    email: emailTransporter ? 'configured' : 'not configured',
+    brevo: brevoApiInstance ? 'configured' : 'not configured',
     firebaseAdmin: adminAuth ? 'configured' : 'not configured',
     cloudinary: process.env.CLOUDINARY_CLOUD_NAME ? 'configured' : 'not configured'
   });
@@ -437,7 +367,7 @@ app.post(
       if (!req.file) {
         return res.status(400).json({ success: false, error: 'No file uploaded' });
       }
-      const avatarUrl = req.file.path; // Cloudinary secure URL
+      const avatarUrl = req.file.path;
       const { uid } = req.user;
 
       const { error } = await supabaseAdmin
@@ -455,7 +385,153 @@ app.post(
   }
 );
 
-// ==================== CONTACT FORM ====================
+// ==================== EMAIL CHANGE WITH OTP (USING BREVO & SUPABASE) ====================
+// Ensure table exists: CREATE TABLE email_change_requests (user_uid TEXT PRIMARY KEY, new_email TEXT NOT NULL, otp_code TEXT NOT NULL, expires_at TIMESTAMP NOT NULL, created_at TIMESTAMP DEFAULT NOW());
+
+app.post('/api/auth/request-email-change', verifyFirebaseToken, async (req, res) => {
+  const { newEmail } = req.body;
+  const { uid, email: currentEmail } = req.user;
+
+  if (!newEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(newEmail)) {
+    return res.status(400).json({ success: false, error: 'Valid email required' });
+  }
+  if (newEmail === currentEmail) {
+    return res.status(400).json({ success: false, error: 'New email must be different from current email' });
+  }
+
+  // Check if user has password provider
+  try {
+    const userRecord = await adminAuth.getUser(uid);
+    const hasPasswordProvider = userRecord.providerData.some(p => p.providerId === 'password');
+    if (!hasPasswordProvider) {
+      return res.status(403).json({ success: false, error: 'Email cannot be changed for social login users' });
+    }
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ success: false, error: 'Failed to verify user' });
+  }
+
+  // Check if new email already in use
+  try {
+    const existingUser = await adminAuth.getUserByEmail(newEmail);
+    if (existingUser) {
+      return res.status(400).json({ success: false, error: 'Email already in use' });
+    }
+  } catch (err) {
+    if (err.code !== 'auth/user-not-found') {
+      console.error(err);
+      return res.status(500).json({ success: false, error: 'Error checking email availability' });
+    }
+  }
+
+  const otp = generateOTP();
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+  const { error: upsertError } = await supabaseAdmin
+    .from('email_change_requests')
+    .upsert({ user_uid: uid, new_email: newEmail, otp_code: otp, expires_at: expiresAt }, { onConflict: 'user_uid' });
+  if (upsertError) {
+    console.error(upsertError);
+    return res.status(500).json({ success: false, error: 'Failed to store request' });
+  }
+
+  const emailSent = await sendEmailViaBrevo({
+    to: newEmail,
+    subject: 'Verify your new email – Sound & Silence',
+    htmlContent: `<div style="font-family: Arial, sans-serif; max-width: 600px; padding: 20px;"><h2>Email Change Request</h2><p>You requested to change the email address associated with your account to this email.</p><p>Use the following OTP to complete the change. It expires in 10 minutes.</p><div style="font-size: 32px; font-weight: bold; background: #f3f4f6; padding: 15px; text-align: center; border-radius: 8px;">${otp}</div><p>If you did not request this, please ignore this email.</p></div>`
+  });
+
+  if (!emailSent) {
+    return res.status(500).json({ success: false, error: 'Failed to send OTP email' });
+  }
+
+  res.json({ success: true, message: 'OTP sent to your new email address' });
+});
+
+app.post('/api/auth/verify-email-change', verifyFirebaseToken, async (req, res) => {
+  const { otp } = req.body;
+  const { uid } = req.user;
+
+  if (!otp || !/^\d{6}$/.test(otp)) {
+    return res.status(400).json({ success: false, error: '6-digit OTP required' });
+  }
+
+  const { data: pending, error: fetchError } = await supabaseAdmin
+    .from('email_change_requests')
+    .select('*')
+    .eq('user_uid', uid)
+    .single();
+
+  if (fetchError || !pending) {
+    return res.status(400).json({ success: false, error: 'No pending email change request' });
+  }
+
+  if (pending.otp_code !== otp) {
+    return res.status(400).json({ success: false, error: 'Invalid OTP' });
+  }
+
+  if (new Date(pending.expires_at) < new Date()) {
+    await supabaseAdmin.from('email_change_requests').delete().eq('user_uid', uid);
+    return res.status(400).json({ success: false, error: 'OTP expired. Please request a new one.' });
+  }
+
+  try {
+    await adminAuth.updateUser(uid, { email: pending.new_email });
+    await supabaseAdmin
+      .from('app_users')
+      .update({ email: pending.new_email, updated_at: new Date().toISOString() })
+      .eq('firebase_uid', uid);
+    await supabaseAdmin.from('email_change_requests').delete().eq('user_uid', uid);
+    res.json({ success: true, message: 'Email updated successfully!' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, error: 'Failed to update email' });
+  }
+});
+
+// ==================== CONTACT FORM (using Brevo) ====================
+async function sendContactEmailToAdmin({ firstName, lastName, email, message, supportType }) {
+  if (!brevoApiInstance) return;
+  const adminEmail = process.env.ADMIN_EMAIL || process.env.BREVO_SENDER_EMAIL;
+  if (!adminEmail) return;
+  await sendEmailViaBrevo({
+    to: adminEmail,
+    subject: `New Contact Message from ${firstName} ${lastName}`,
+    htmlContent: `<div style="font-family: Arial, sans-serif;"><h2>New Contact Form Submission</h2><p><strong>Name:</strong> ${firstName} ${lastName}</p><p><strong>Email:</strong> ${email}</p><p><strong>Type:</strong> ${supportType || 'General'}</p><p><strong>Message:</strong></p><p>${message.replace(/\n/g, '<br>')}</p></div>`
+  });
+}
+
+async function sendAutoReplyToUser(email, firstName, userMessage) {
+  if (!brevoApiInstance) return;
+  await sendEmailViaBrevo({
+    to: email,
+    subject: 'We received your message – Sound & Silence',
+    htmlContent: `<div style="font-family: Arial, sans-serif; max-width: 600px;"><h2>Hello ${firstName},</h2><p>Thank you for reaching out to Sound & Silence. We have received your message and will get back to you within 24 hours.</p><p><strong>Your message:</strong><br>${userMessage.replace(/\n/g, '<br>')}</p><p>In the meantime, feel free to explore our <a href="https://soundandsilence.com/events">upcoming events</a>.</p><hr><p style="font-size: 12px;">Sound & Silence – Science-based sober events</p></div>`
+  });
+}
+
+async function sendSupportTicketEmailToAdmin({ name, email, message }) {
+  if (!brevoApiInstance) return;
+  const adminEmail = process.env.ADMIN_EMAIL || process.env.BREVO_SENDER_EMAIL;
+  if (!adminEmail) return;
+  await sendEmailViaBrevo({
+    to: adminEmail,
+    subject: `New Support Ticket from ${name}`,
+    htmlContent: `<div style="font-family: Arial, sans-serif;"><h2>Support Ticket</h2><p><strong>Name:</strong> ${name}</p><p><strong>Email:</strong> ${email}</p><p><strong>Message:</strong></p><p>${message.replace(/\n/g, '<br>')}</p></div>`
+  });
+}
+
+async function sendSupportInquiryEmailToAdmin({ firstName, lastName, email, phone, message, supportType, organization, donationAmount }) {
+  if (!brevoApiInstance) return;
+  const adminEmail = process.env.ADMIN_EMAIL || process.env.BREVO_SENDER_EMAIL;
+  if (!adminEmail) return;
+  await sendEmailViaBrevo({
+    to: adminEmail,
+    subject: `New Support Inquiry: ${supportType || 'General'} from ${firstName} ${lastName}`,
+    htmlContent: `<div style="font-family: Arial, sans-serif;"><h2>Support Inquiry</h2><p><strong>Name:</strong> ${firstName} ${lastName}</p><p><strong>Email:</strong> ${email}</p><p><strong>Phone:</strong> ${phone || 'Not provided'}</p><p><strong>Organization:</strong> ${organization || 'Not provided'}</p><p><strong>Support Type:</strong> ${supportType || 'Not specified'}</p><p><strong>Donation Amount:</strong> ${donationAmount || 'Not specified'}</p><p><strong>Message:</strong></p><p>${message ? message.replace(/\n/g, '<br>') : 'No message provided'}</p></div>`
+  });
+}
+
 app.post('/api/contact', async (req, res) => {
   const { firstName, lastName, email, message, turnstile_token, supportType } = req.body;
   if (!turnstile_token) return res.status(400).json({ success: false, error: 'Verification required' });
@@ -1095,7 +1171,7 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`\n🎵 Sound & Silence API running on port ${PORT}`);
   console.log(`📊 Health: http://localhost:${PORT}/api/health`);
-  console.log(`📧 Email: ${emailTransporter ? 'Configured' : 'Not configured'}`);
+  console.log(`📧 Brevo Email: ${brevoApiInstance ? 'Configured (HTTPS)' : 'Not configured'}`);
   console.log(`🔐 Firebase Admin: ${adminAuth ? 'Configured' : 'Not configured'}`);
   console.log(`📋 Rate Limiting: Active`);
   console.log(`🎥 Vlogs: http://localhost:${PORT}/api/vlogs`);
