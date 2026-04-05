@@ -1030,28 +1030,38 @@ app.put('/api/event-registrations/:id/status', async (req, res) => {
   }
   
   try {
-    // First, check if registration exists
+    // First, check if registration exists (optional but good for debugging)
     const { data: existing, error: findError } = await supabase
       .from('event_registrations')
       .select('id')
       .eq('id', id)
-      .single();
+      .maybeSingle();
     
     if (findError || !existing) {
+      console.log(`❌ Registration with id ${id} not found`);
       return res.status(404).json({ success: false, error: 'Registration not found' });
     }
     
-    const { error } = await supabase
+    // Perform update and capture the returned data
+    const { data: updated, error } = await supabase
       .from('event_registrations')
       .update({ 
         status, 
         updated_at: new Date().toISOString() 
       })
-      .eq('id', id);
+      .eq('id', id)
+      .select();  // ← add .select() to get the updated record(s)
     
     if (error) throw error;
     
-    res.json({ success: true });
+    // Check if any row was actually updated
+    if (!updated || updated.length === 0) {
+      console.log(`⚠️ No rows updated for id ${id}`);
+      return res.status(404).json({ success: false, error: 'Registration not found or no changes made' });
+    }
+    
+    console.log(`✅ Updated registration ${id} to status ${status}`);
+    res.json({ success: true, registration: updated[0] });
   } catch (error) {
     console.error('Error updating registration status:', error);
     res.status(500).json({ success: false, error: error.message });
