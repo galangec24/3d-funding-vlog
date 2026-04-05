@@ -6,7 +6,7 @@ import rateLimit from 'express-rate-limit';
 import nodemailer from 'nodemailer';
 import admin from 'firebase-admin';
 import { getAuth as getAdminAuth } from 'firebase-admin/auth';
-import net from 'net';  // for SMTP debug endpoint
+import net from 'net';
 
 dotenv.config();
 
@@ -28,20 +28,18 @@ app.use(express.json());
 const CLOUDFLARE_SECRET_KEY = process.env.CLOUDFLARE_SECRET_KEY || '';
 const CLOUDFLARE_SITE_KEY = process.env.CLOUDFLARE_SITE_KEY || '';
 
-// ==================== EMAIL CONFIGURATION (FIXED) ====================
+// ==================== EMAIL CONFIGURATION ====================
 let emailTransporter = null;
 try {
   if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
-    // Explicit SMTP configuration with timeouts – solves connection timeout
     emailTransporter = nodemailer.createTransport({
-      host: 'smtp.gmail.com',      // or process.env.SMTP_HOST if you switch providers
-      port: 587,                    // or process.env.SMTP_PORT
-      secure: false,                // true for 465, false for 587
+      host: 'smtp.gmail.com',
+      port: 587,
+      secure: false,
       auth: {
         user: process.env.EMAIL_USER,
         pass: process.env.EMAIL_PASS,
       },
-      // Critical timeouts (milliseconds)
       connectionTimeout: 10000,
       greetingTimeout: 10000,
       socketTimeout: 15000,
@@ -71,8 +69,18 @@ try {
   console.warn('⚠️ Firebase Admin init error:', err.message);
 }
 
+// ==================== SUPABASE CLIENT ====================
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_ANON_KEY;
+if (!supabaseUrl || !supabaseKey) {
+  console.error('❌ Missing Supabase credentials!');
+  console.warn('⚠️ Running without Supabase - some features will not work');
+}
+const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
+
+// ==================== HELPER: GET USER ID FROM FIREBASE TOKEN ====================
 async function getUserIdFromToken(token) {
-  if (!token || !adminAuth) return null;
+  if (!token || !adminAuth || !supabase) return null;
   try {
     const decoded = await adminAuth.verifyIdToken(token);
     const email = decoded.email;
@@ -146,18 +154,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// ==================== SUPABASE CLIENT ====================
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_ANON_KEY;
-if (!supabaseUrl || !supabaseKey) {
-  console.error('❌ Missing Supabase credentials!');
-  console.warn('⚠️ Running without Supabase - some features will not work');
-}
-const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
-
 // ==================== PROFESSIONAL EMAIL TEMPLATES ====================
-// All email sending functions – now using the fixed transporter
-
 async function sendContactEmailToAdmin({ firstName, lastName, email, message, supportType }) {
   if (!emailTransporter) return;
   const mailOptions = {
@@ -289,7 +286,7 @@ async function sendPasswordResetEmail(email, code) {
     console.log('✅ Password reset OTP sent to', email);
   } catch (error) {
     console.error('❌ Failed to send password reset OTP:', error);
-    throw error; // Re-throw so the endpoint knows it failed
+    throw error;
   }
 }
 
@@ -297,21 +294,9 @@ async function sendPasswordResetEmail(email, code) {
 app.get('/api/debug/smtp-test', (req, res) => {
   const socket = net.createConnection(587, 'smtp.gmail.com');
   socket.setTimeout(5000);
-
-  socket.on('connect', () => {
-    socket.destroy();
-    res.json({ success: true, message: 'Can reach smtp.gmail.com:587' });
-  });
-
-  socket.on('timeout', () => {
-    socket.destroy();
-    res.status(500).json({ success: false, error: 'Connection timeout' });
-  });
-
-  socket.on('error', (err) => {
-    socket.destroy();
-    res.status(500).json({ success: false, error: err.message });
-  });
+  socket.on('connect', () => { socket.destroy(); res.json({ success: true, message: 'Can reach smtp.gmail.com:587' }); });
+  socket.on('timeout', () => { socket.destroy(); res.status(500).json({ success: false, error: 'Connection timeout' }); });
+  socket.on('error', (err) => { socket.destroy(); res.status(500).json({ success: false, error: err.message }); });
 });
 
 // ==================== PASSWORD RESET ENDPOINTS ====================
@@ -350,7 +335,6 @@ app.post('/api/auth/forgot-password', async (req, res) => {
     await sendPasswordResetEmail(email, code);
     res.json({ success: true, message: 'OTP sent to your email' });
   } catch (emailError) {
-    // If email fails, still return success to user (don't leak internal error), but log it
     console.error('Email send failed, but OTP saved in DB:', emailError);
     res.json({ success: true, message: 'If the email exists, an OTP has been sent.' });
   }
@@ -592,25 +576,44 @@ app.get('/api/users/:id', async (req, res) => {
   } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
 
+// ==================== MY EVENTS (FIXED – FALLBACK TO EMAIL) ====================
 app.get('/api/users/my-events', async (req, res) => {
   const token = req.headers.authorization?.split('Bearer ')[1];
   if (!token || !supabase) {
     return res.json({ success: false, registrations: [] });
   }
-  const userId = await getUserIdFromToken(token);
-  if (!userId) {
+
+  let userId = await getUserIdFromToken(token);
+  let userEmail = null;
+
+  // Also extract email from token for fallback
+  try {
+    const decoded = await adminAuth.verifyIdToken(token);
+    userEmail = decoded.email;
+  } catch (err) {
+    console.error('Token decode error:', err);
+  }
+
+  // Build query: match by user_id OR by user_email
+  let query = supabase
+    .from('event_registrations')
+    .select(`
+      id,
+      registered_at,
+      status,
+      events!inner (id, title, event_date, location, image_url)
+    `);
+
+  if (userId) {
+    query = query.eq('user_id', userId);
+  } else if (userEmail) {
+    query = query.eq('user_email', userEmail.toLowerCase());
+  } else {
     return res.json({ success: false, registrations: [] });
   }
+
   try {
-    const { data, error } = await supabase
-      .from('event_registrations')
-      .select(`
-        id,
-        registered_at,
-        status,
-        events!inner (id, title, event_date, location, image_url)
-      `)
-      .eq('user_id', userId);
+    const { data, error } = await query;
     if (error) throw error;
     const registrations = (data || []).map(reg => ({
       id: reg.id,
@@ -854,6 +857,7 @@ app.delete('/api/events/:id', async (req, res) => {
   } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
 
+// ==================== REGISTRATION (with duplicate check and auto-accept) ====================
 app.post('/api/events/:id/register', async (req, res) => {
   const { id } = req.params;
   const { user_name, user_email, user_phone, special_requests } = req.body;
@@ -866,17 +870,77 @@ app.post('/api/events/:id/register', async (req, res) => {
 
   // Get user ID from Firebase token if available
   let userId = null;
-  if (token) userId = await getUserIdFromToken(token);
-  if (!userId && user_email) {
-    const { data: existingUser } = await supabase.from('app_users').select('id').eq('email', user_email.toLowerCase()).maybeSingle();
-    if (existingUser) userId = existingUser.id;
+  let firebaseUid = null;
+
+  if (token) {
+    try {
+      const decoded = await adminAuth.verifyIdToken(token);
+      firebaseUid = decoded.uid;
+      const email = decoded.email || user_email;
+
+      // Try to find existing user
+      let { data: existingUser } = await supabase
+        .from('app_users')
+        .select('id')
+        .eq('firebase_uid', firebaseUid)
+        .maybeSingle();
+
+      if (!existingUser) {
+        const { data: userByEmail } = await supabase
+          .from('app_users')
+          .select('id')
+          .eq('email', email.toLowerCase())
+          .maybeSingle();
+        if (userByEmail) {
+          await supabase
+            .from('app_users')
+            .update({ firebase_uid: firebaseUid })
+            .eq('id', userByEmail.id);
+          userId = userByEmail.id;
+        } else {
+          const { data: newUser, error: createError } = await supabase
+            .from('app_users')
+            .insert([{
+              firebase_uid: firebaseUid,
+              email: email.toLowerCase(),
+              name: user_name,
+              user_type: 'user',
+              created_at: new Date().toISOString(),
+              last_login: new Date().toISOString()
+            }])
+            .select()
+            .single();
+          if (!createError && newUser) userId = newUser.id;
+        }
+      } else {
+        userId = existingUser.id;
+      }
+    } catch (err) {
+      console.error('Token processing error:', err);
+    }
   }
 
-  // Check for duplicate registration
-  let query = supabase.from('event_registrations').select('id, status').eq('event_id', id);
-  if (userId) query = query.eq('user_id', userId);
-  else query = query.eq('user_email', user_email.toLowerCase());
-  const { data: existingReg } = await query.maybeSingle();
+  // Fallback: try to find user by email if userId still null
+  if (!userId && user_email) {
+    const { data: userByEmail } = await supabase
+      .from('app_users')
+      .select('id')
+      .eq('email', user_email.toLowerCase())
+      .maybeSingle();
+    if (userByEmail) userId = userByEmail.id;
+  }
+
+  // Duplicate check
+  let duplicateQuery = supabase
+    .from('event_registrations')
+    .select('id, status')
+    .eq('event_id', id);
+  if (userId) {
+    duplicateQuery = duplicateQuery.eq('user_id', userId);
+  } else {
+    duplicateQuery = duplicateQuery.eq('user_email', user_email.toLowerCase());
+  }
+  const { data: existingReg } = await duplicateQuery.maybeSingle();
   if (existingReg) {
     const statusMsg = existingReg.status === 'pending' ? 'pending approval' : existingReg.status;
     return res.status(400).json({ success: false, error: `You have already registered for this event (${statusMsg}). You cannot register again.` });
@@ -884,13 +948,20 @@ app.post('/api/events/:id/register', async (req, res) => {
 
   try {
     // Get event details
-    const { data: event, error: eventError } = await supabase.from('events').select('capacity, status, price').eq('id', id).single();
+    const { data: event, error: eventError } = await supabase
+      .from('events')
+      .select('capacity, status, price')
+      .eq('id', id)
+      .single();
     if (eventError || !event) return res.status(404).json({ success: false, error: 'Event not found' });
     if (event.status !== 'upcoming') return res.status(400).json({ success: false, error: 'Event is not open for registration' });
 
     // Capacity check
     if (event.capacity) {
-      const { count } = await supabase.from('event_registrations').select('*', { count: 'exact', head: true }).eq('event_id', id);
+      const { count } = await supabase
+        .from('event_registrations')
+        .select('*', { count: 'exact', head: true })
+        .eq('event_id', id);
       if (count >= event.capacity) return res.status(400).json({ success: false, error: 'Event is full' });
     }
 
@@ -909,7 +980,10 @@ app.post('/api/events/:id/register', async (req, res) => {
     };
     if (userId) insertData.user_id = userId;
 
-    const { data, error } = await supabase.from('event_registrations').insert([insertData]).select();
+    const { data, error } = await supabase
+      .from('event_registrations')
+      .insert([insertData])
+      .select();
     if (error) throw error;
 
     res.json({ success: true, registration: data[0] });
@@ -919,6 +993,7 @@ app.post('/api/events/:id/register', async (req, res) => {
   }
 });
 
+// ==================== REGISTRATION MANAGEMENT (Admin) ====================
 app.get('/api/events/:id/registrations', async (req, res) => {
   const { id } = req.params;
   if (!supabase) return res.status(500).json({ success: false, error: 'Database error' });
@@ -929,8 +1004,6 @@ app.get('/api/events/:id/registrations', async (req, res) => {
   } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
 
-
-// Update registration status (accept/reject) – admin only
 app.put('/api/event-registrations/:id/status', async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
@@ -941,28 +1014,6 @@ app.put('/api/event-registrations/:id/status', async (req, res) => {
     if (error) throw error;
     res.json({ success: true });
   } catch (error) { res.status(500).json({ success: false, error: error.message }); }
-});
-
-// Get registrations for the currently logged‑in user
-app.get('/api/my-registrations', async (req, res) => {
-  const token = req.headers.authorization?.split('Bearer ')[1];
-  if (!token || !supabase) return res.json({ success: true, registrations: [] });
-  try {
-    const userId = parseInt(Buffer.from(token, 'base64').toString().split(':')[0]);
-    const { data, error } = await supabase
-      .from('event_registrations')
-      .select(`
-        id,
-        status,
-        registered_at,
-        events!inner (id, title, event_date, location, image_url)
-      `)
-      .eq('user_id', userId);
-    if (error) throw error;
-    res.json({ success: true, registrations: data });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
 });
 
 // ==================== STATISTICS ====================
