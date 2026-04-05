@@ -579,101 +579,63 @@ app.get('/api/users/:id', async (req, res) => {
 // ==================== MY EVENTS (FIXED – FALLBACK TO EMAIL) ====================
 // ==================== MY EVENTS (DEBUG + FIX) ====================
 app.get('/api/users/my-events', async (req, res) => {
+  console.log('🚀 /api/users/my-events hit');
   const authHeader = req.headers.authorization;
+  console.log('📋 Authorization header:', authHeader ? 'present' : 'missing');
+  
   const token = authHeader?.split('Bearer ')[1];
-
-  console.log('=== MY EVENTS REQUEST ===');
-  console.log('Authorization header present:', !!authHeader);
-  console.log('Token present:', !!token);
-
-  if (!token || !supabase) {
-    console.log('Missing token or supabase');
-    return res.json({ success: false, registrations: [] });
+  if (!token) {
+    console.log('❌ No token provided');
+    return res.json({ success: false, registrations: [], error: 'No token' });
   }
-
-  let userId = null;
-  let userEmail = null;
 
   try {
     const decoded = await adminAuth.verifyIdToken(token);
-    userEmail = decoded.email;
-    const firebaseUid = decoded.uid;
-    console.log('Decoded token email:', userEmail);
-    console.log('Decoded token UID:', firebaseUid);
-
-    // Try to find user by firebase_uid first
-    const { data: userByUid } = await supabase
-      .from('app_users')
-      .select('id, email')
-      .eq('firebase_uid', firebaseUid)
-      .maybeSingle();
-    if (userByUid) {
-      userId = userByUid.id;
-      console.log('Found user by firebase_uid:', userId);
-    } else {
-      // Then try by email
-      const { data: userByEmail } = await supabase
-        .from('app_users')
-        .select('id, email')
-        .eq('email', userEmail)
-        .maybeSingle();
-      if (userByEmail) {
-        userId = userByEmail.id;
-        console.log('Found user by email:', userId);
-      } else {
-        console.log('No user found in app_users for this email');
-      }
+    const email = decoded.email;
+    console.log('✅ Token verified, email:', email);
+    
+    if (!email) {
+      console.log('❌ No email in token');
+      return res.json({ success: false, registrations: [] });
     }
+
+    // Direct query by email (case-insensitive)
+    const { data, error } = await supabase
+      .from('event_registrations')
+      .select(`
+        id,
+        registered_at,
+        status,
+        events!inner (id, title, event_date, location, image_url)
+      `)
+      .ilike('user_email', email);  // case-insensitive match
+
+    if (error) {
+      console.error('❌ Supabase error:', error);
+      throw error;
+    }
+
+    console.log(`✅ Found ${data?.length || 0} registrations for ${email}`);
+    if (data && data.length > 0) {
+      console.log('📝 First registration:', JSON.stringify(data[0], null, 2));
+    }
+
+    const registrations = (data || []).map(reg => ({
+      id: reg.id,
+      registered_at: reg.registered_at,
+      status: reg.status || 'pending',
+      event_id: reg.events.id,
+      event_title: reg.events.title,
+      event_date: reg.events.event_date,
+      event_location: reg.events.location,
+      event_image: reg.events.image_url
+    }));
+
+    res.json({ success: true, registrations });
   } catch (err) {
-    console.error('Token verification failed:', err.message);
-    return res.status(401).json({ success: false, error: 'Invalid token' });
+    console.error('❌ Server error:', err);
+    res.status(500).json({ success: false, error: err.message });
   }
-
-  // Query registrations: by user_id OR by user_email (case-insensitive)
-  let query = supabase
-    .from('event_registrations')
-    .select(`
-      id,
-      registered_at,
-      status,
-      events!inner (id, title, event_date, location, image_url)
-    `);
-
-  if (userId) {
-    console.log('Querying by user_id:', userId);
-    query = query.eq('user_id', userId);
-  } else if (userEmail) {
-    console.log('Querying by user_email:', userEmail);
-    // Use ilike for case-insensitive match
-    query = query.ilike('user_email', userEmail);
-  } else {
-    console.log('No user_id or email available');
-    return res.json({ success: false, registrations: [] });
-  }
-
-  const { data, error } = await query;
-  if (error) {
-    console.error('Supabase error:', error);
-    return res.status(500).json({ success: false, error: error.message });
-  }
-
-  console.log(`Found ${data?.length || 0} registrations`);
-  if (data?.length > 0) {
-    console.log('First registration:', data[0]);
-  }
-
-  const registrations = (data || []).map(reg => ({
-    id: reg.id,
-    registered_at: reg.registered_at,
-    status: reg.status || 'pending',
-    event_id: reg.events.id,
-    event_title: reg.events.title,
-    event_date: reg.events.event_date,
-    event_location: reg.events.location,
-    event_image: reg.events.image_url
-  }));
-
-  res.json({ success: true, registrations });
 });
 
 // ==================== ONLINE USERS ====================
