@@ -71,6 +71,34 @@ try {
   console.warn('⚠️ Firebase Admin init error:', err.message);
 }
 
+async function getUserIdFromToken(token) {
+  if (!token || !adminAuth) return null;
+  try {
+    const decoded = await adminAuth.verifyIdToken(token);
+    const email = decoded.email;
+    // First try by firebase_uid
+    const { data: userByUid } = await supabase
+      .from('app_users')
+      .select('id')
+      .eq('firebase_uid', decoded.uid)
+      .maybeSingle();
+    if (userByUid) return userByUid.id;
+    // Then try by email
+    if (email) {
+      const { data: userByEmail } = await supabase
+        .from('app_users')
+        .select('id')
+        .eq('email', email.toLowerCase())
+        .maybeSingle();
+      if (userByEmail) return userByEmail.id;
+    }
+    return null;
+  } catch (err) {
+    console.error('Token verification error:', err);
+    return null;
+  }
+}
+
 // ==================== TURNSTILE VERIFICATION ====================
 async function verifyTurnstile(token) {
   if (!token) return false;
@@ -566,10 +594,14 @@ app.get('/api/users/:id', async (req, res) => {
 
 app.get('/api/users/my-events', async (req, res) => {
   const token = req.headers.authorization?.split('Bearer ')[1];
-  if (!token || !supabase) return res.json({ success: false, registrations: [] });
-
+  if (!token || !supabase) {
+    return res.json({ success: false, registrations: [] });
+  }
+  const userId = await getUserIdFromToken(token);
+  if (!userId) {
+    return res.json({ success: false, registrations: [] });
+  }
   try {
-    const userId = parseInt(Buffer.from(token, 'base64').toString().split(':')[0]);
     const { data, error } = await supabase
       .from('event_registrations')
       .select(`
@@ -767,40 +799,20 @@ app.get('/api/events', async (req, res) => {
 app.get('/api/events/admin', async (req, res) => {
   if (!supabase) return res.json({ success: true, events: [] });
   try {
-    const { data: events, error } = await supabase
-      .from('events')
-      .select('*')
-      .order('event_date', { ascending: false });
+    const { data: events, error } = await supabase.from('events').select('*').order('event_date', { ascending: false });
     if (error) throw error;
-
-    // Get registration counts
-    const { data: counts, error: countError } = await supabase
-      .from('event_registrations')
-      .select('event_id');
-    
+    const { data: counts } = await supabase.from('event_registrations').select('event_id');
     const countMap = {};
-    if (counts) {
-      counts.forEach(reg => {
-        countMap[reg.event_id] = (countMap[reg.event_id] || 0) + 1;
-      });
-    }
-
-    const eventsWithCount = events.map(event => ({
-      ...event,
-      registrations_count: countMap[event.id] || 0
-    }));
-
+    if (counts) counts.forEach(reg => { countMap[reg.event_id] = (countMap[reg.event_id] || 0) + 1; });
+    const eventsWithCount = events.map(event => ({ ...event, registrations_count: countMap[event.id] || 0 }));
     res.json({ success: true, events: eventsWithCount });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
+  } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
 
 app.get('/api/events/:id', async (req, res) => {
-  const { id } = req.params;
   if (!supabase) return res.json({ success: true, event: null });
   try {
-    const { data, error } = await supabase.from('events').select('*').eq('id', id).single();
+    const { data, error } = await supabase.from('events').select('*').eq('id', req.params.id).single();
     if (error) throw error;
     res.json({ success: true, event: data });
   } catch (error) { res.status(500).json({ success: false, error: error.message }); }
@@ -850,50 +862,42 @@ app.post('/api/events/:id/register', async (req, res) => {
   if (!user_name || !user_email) {
     return res.status(400).json({ success: false, error: 'Name and email required' });
   }
+  if (!supabase) return res.json({ success: true, registration: { id: Date.now() } });
 
-  if (!supabase) {
-    return res.json({ success: true, registration: { id: Date.now() } });
+  // Get user ID from Firebase token if available
+  let userId = null;
+  if (token) userId = await getUserIdFromToken(token);
+  if (!userId && user_email) {
+    const { data: existingUser } = await supabase.from('app_users').select('id').eq('email', user_email.toLowerCase()).maybeSingle();
+    if (existingUser) userId = existingUser.id;
   }
 
-  // Get the authenticated user's ID from the token
-  let userId = null;
-  if (token) {
-    try {
-      const decoded = Buffer.from(token, 'base64').toString();
-      userId = parseInt(decoded.split(':')[0]);
-    } catch (err) {
-      console.error('Invalid token:', err);
-    }
+  // Check for duplicate registration
+  let query = supabase.from('event_registrations').select('id, status').eq('event_id', id);
+  if (userId) query = query.eq('user_id', userId);
+  else query = query.eq('user_email', user_email.toLowerCase());
+  const { data: existingReg } = await query.maybeSingle();
+  if (existingReg) {
+    const statusMsg = existingReg.status === 'pending' ? 'pending approval' : existingReg.status;
+    return res.status(400).json({ success: false, error: `You have already registered for this event (${statusMsg}). You cannot register again.` });
   }
 
   try {
-    // Check if the event exists and is upcoming
-    const { data: event, error: eventError } = await supabase
-      .from('events')
-      .select('capacity, status')
-      .eq('id', id)
-      .single();
+    // Get event details
+    const { data: event, error: eventError } = await supabase.from('events').select('capacity, status, price').eq('id', id).single();
+    if (eventError || !event) return res.status(404).json({ success: false, error: 'Event not found' });
+    if (event.status !== 'upcoming') return res.status(400).json({ success: false, error: 'Event is not open for registration' });
 
-    if (eventError || !event) {
-      return res.status(404).json({ success: false, error: 'Event not found' });
-    }
-    if (event.status !== 'upcoming') {
-      return res.status(400).json({ success: false, error: 'Event is not open for registration' });
-    }
-
-    // Check capacity if set
+    // Capacity check
     if (event.capacity) {
-      const { count, error: countError } = await supabase
-        .from('event_registrations')
-        .select('*', { count: 'exact', head: true })
-        .eq('event_id', id);
-      if (countError) throw countError;
-      if (count >= event.capacity) {
-        return res.status(400).json({ success: false, error: 'Event is full' });
-      }
+      const { count } = await supabase.from('event_registrations').select('*', { count: 'exact', head: true }).eq('event_id', id);
+      if (count >= event.capacity) return res.status(400).json({ success: false, error: 'Event is full' });
     }
 
-    // Insert registration (prefer user_id if available, otherwise store name/email)
+    // Auto-accept if free
+    const isFree = !event.price || event.price.toLowerCase() === 'free' || event.price === '0' || event.price === '£0';
+    const registrationStatus = isFree ? 'accepted' : 'pending';
+
     const insertData = {
       event_id: id,
       user_name: user_name.trim(),
@@ -901,17 +905,11 @@ app.post('/api/events/:id/register', async (req, res) => {
       user_phone: user_phone || null,
       special_requests: special_requests || null,
       registered_at: new Date().toISOString(),
-      status: 'pending'
+      status: registrationStatus
     };
-    if (userId) {
-      insertData.user_id = userId;
-    }
+    if (userId) insertData.user_id = userId;
 
-    const { data, error } = await supabase
-      .from('event_registrations')
-      .insert([insertData])
-      .select();
-
+    const { data, error } = await supabase.from('event_registrations').insert([insertData]).select();
     if (error) throw error;
 
     res.json({ success: true, registration: data[0] });
@@ -925,36 +923,24 @@ app.get('/api/events/:id/registrations', async (req, res) => {
   const { id } = req.params;
   if (!supabase) return res.status(500).json({ success: false, error: 'Database error' });
   try {
-    const { data, error } = await supabase
-      .from('event_registrations')
-      .select('*')
-      .eq('event_id', id)
-      .order('registered_at', { ascending: false });
+    const { data, error } = await supabase.from('event_registrations').select('*').eq('event_id', id).order('registered_at', { ascending: false });
     if (error) throw error;
     res.json({ success: true, registrations: data });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
+  } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
+
 
 // Update registration status (accept/reject) – admin only
 app.put('/api/event-registrations/:id/status', async (req, res) => {
   const { id } = req.params;
-  const { status } = req.body; // 'accepted', 'rejected', 'pending'
-  if (!['pending', 'accepted', 'rejected'].includes(status)) {
-    return res.status(400).json({ success: false, error: 'Invalid status' });
-  }
+  const { status } = req.body;
+  if (!['pending', 'accepted', 'rejected'].includes(status)) return res.status(400).json({ success: false, error: 'Invalid status' });
   if (!supabase) return res.status(500).json({ success: false, error: 'Database error' });
   try {
-    const { error } = await supabase
-      .from('event_registrations')
-      .update({ status, updated_at: new Date().toISOString() })
-      .eq('id', id);
+    const { error } = await supabase.from('event_registrations').update({ status, updated_at: new Date().toISOString() }).eq('id', id);
     if (error) throw error;
     res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
+  } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
 
 // Get registrations for the currently logged‑in user
