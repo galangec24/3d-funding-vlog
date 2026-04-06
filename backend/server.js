@@ -1354,15 +1354,15 @@ app.get('/api/events/:id/comments', async (req, res) => {
     try { const decoded = await adminAuth.verifyIdToken(token); currentUserId = decoded.uid; } catch (err) {}
   }
   try {
-    // Fetch comments
+    // Fetch all comments (including replies) for this event
     const { data: comments, error } = await supabaseAdmin
       .from('event_comments')
       .select('*')
       .eq('event_id', parseInt(id))
-      .order('created_at', { ascending: false });
+      .order('created_at', { ascending: true });
     if (error) throw error;
     if (!comments.length) return res.json({ success: true, comments: [] });
-    // Get comment IDs
+    
     const commentIds = comments.map(c => c.id);
     // Fetch all reactions for these comments
     const { data: reactions } = await supabaseAdmin.from('comment_reactions').select('comment_id, reaction').in('comment_id', commentIds);
@@ -1374,7 +1374,6 @@ app.get('/api/events/:id/comments', async (req, res) => {
       const { data: userReacts } = await supabaseAdmin.from('comment_reactions').select('comment_id, reaction').in('comment_id', commentIds).eq('user_id', currentUserId);
       userReacts.forEach(r => { userReactions[r.comment_id] = r.reaction; });
     }
-    // Also fetch reaction users per comment? Optional – can be fetched on hover later.
     res.json({ success: true, comments, reactionCounts, userReactions });
   } catch (error) {
     console.error('Error fetching comments:', error);
@@ -1382,12 +1381,12 @@ app.get('/api/events/:id/comments', async (req, res) => {
   }
 });
 
+
 app.post('/api/events/:id/comments', verifyFirebaseToken, async (req, res) => {
   const { id } = req.params;
-  const { content } = req.body;
+  const { content, parent_comment_id } = req.body;
   const userId = req.user.uid;
   const userEmail = req.user.email;
-  // Get user name and avatar from app_users
   const { data: userData, error: userError } = await supabaseAdmin
     .from('app_users')
     .select('name, avatar_url')
@@ -1398,17 +1397,16 @@ app.post('/api/events/:id/comments', verifyFirebaseToken, async (req, res) => {
   const userAvatar = userData?.avatar_url || null;
   if (!content || content.trim().length === 0) return res.status(400).json({ success: false, error: 'Comment cannot be empty' });
   try {
-    const { data, error } = await supabaseAdmin
-      .from('event_comments')
-      .insert([{
-        event_id: parseInt(id),
-        user_id: userId,
-        user_name: userName,
-        user_avatar: userAvatar,
-        content: content.trim(),
-        created_at: new Date().toISOString()
-      }])
-      .select();
+    const insertData = {
+      event_id: parseInt(id),
+      user_id: userId,
+      user_name: userName,
+      user_avatar: userAvatar,
+      content: content.trim(),
+      created_at: new Date().toISOString()
+    };
+    if (parent_comment_id) insertData.parent_comment_id = parseInt(parent_comment_id);
+    const { data, error } = await supabaseAdmin.from('event_comments').insert([insertData]).select();
     if (error) throw error;
     res.json({ success: true, comment: data[0] });
   } catch (error) {
