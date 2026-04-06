@@ -86,6 +86,31 @@ const uploadBlogImage = multer({
   },
 });
 
+const blogMediaStorage = new CloudinaryStorage({
+  cloudinary: cloudinary,
+  params: (req, file) => {
+    const isVideo = file.mimetype.startsWith('video/');
+    return {
+      folder: 'blog_media',
+      resource_type: isVideo ? 'video' : 'image',
+      allowed_formats: isVideo ? ['mp4', 'webm', 'mov'] : ['jpg', 'jpeg', 'png', 'gif', 'webp'],
+      transformation: isVideo ? [{ width: 1280, crop: 'limit' }] : [{ width: 1200, crop: 'limit' }],
+    };
+  },
+});
+
+const uploadBlogMedia = multer({
+  storage: blogMediaStorage,
+  limits: { fileSize: 5 * 1024 * 1024 }, 
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith('image/') || file.mimetype.startsWith('video/')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only images and videos are allowed'), false);
+    }
+  },
+});
+
 // ==================== BREVO EMAIL API (DIRECT FETCH, NO SDK) ====================
 const BREVO_API_KEY = process.env.BREVO_API_KEY;
 const BREVO_SENDER_EMAIL = process.env.BREVO_SENDER_EMAIL || 'noreply@yourdomain.com';
@@ -835,10 +860,16 @@ app.delete('/api/vlogs/:id', async (req, res) => {
 // ==================== BLOG POSTS ====================
 app.get('/api/blog/posts', async (req, res) => {
   try {
-    const { data, error } = await supabaseAnon.from('blog_posts').select('*').eq('status', 'published').order('published_at', { ascending: false });
+    const { data, error } = await supabaseAnon
+      .from('blog_posts')
+      .select('*')
+      .eq('status', 'published')
+      .order('published_at', { ascending: false });
     if (error) throw error;
     res.json({ success: true, posts: data || [] });
-  } catch (error) { res.status(500).json({ success: false, error: error.message }); }
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
 app.get('/api/blog/admin/posts', async (req, res) => {
@@ -862,6 +893,20 @@ app.post('/api/blog/upload-image', verifyFirebaseToken, uploadBlogImage.single('
   }
 });
 
+app.post('/api/blog/upload-media', verifyFirebaseToken, uploadBlogMedia.single('media'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ success: false, error: 'No file uploaded' });
+    }
+    const mediaUrl = req.file.path; // Cloudinary secure URL
+    const mediaType = req.file.mimetype.startsWith('image/') ? 'image' : 'video';
+    res.json({ success: true, mediaUrl, type: mediaType });
+  } catch (error) {
+    console.error('Blog media upload error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 app.get('/api/blog/posts/:id', async (req, res) => {
   const { id } = req.params;
   try {
@@ -873,14 +918,33 @@ app.get('/api/blog/posts/:id', async (req, res) => {
 });
 
 app.post('/api/blog/posts', strictLimiter, async (req, res) => {
-  const { title, content, author_name, author_email, excerpt, featured_image, images, tags, turnstile_token } = req.body;
-  if (!turnstile_token) return res.status(400).json({ success: false, error: 'Verification required' });
+  const {
+    title,
+    content,
+    author_name,
+    author_email,
+    excerpt,
+    mediaItems,     
+    tags,
+    turnstile_token
+  } = req.body;
+
+  // Turnstile validation
+  if (!turnstile_token) {
+    return res.status(400).json({ success: false, error: 'Verification required' });
+  }
   const isHuman = await verifyTurnstile(turnstile_token);
-  if (!isHuman) return res.status(400).json({ success: false, error: 'Verification failed' });
-  if (!title || !content || !author_name || !author_email) return res.status(400).json({ success: false, error: 'Required fields missing' });
+  if (!isHuman) {
+    return res.status(400).json({ success: false, error: 'Verification failed' });
+  }
+
+  // Required fields
+  if (!title || !content || !author_name || !author_email) {
+    return res.status(400).json({ success: false, error: 'Required fields missing' });
+  }
 
   const excerptText = excerpt || content.substring(0, 150);
-  const defaultImage = `https://picsum.photos/800/400?random=${Date.now()}`;
+
   try {
     const { data, error } = await supabaseAdmin.from('blog_posts').insert([{
       title: title.trim(),
@@ -888,30 +952,51 @@ app.post('/api/blog/posts', strictLimiter, async (req, res) => {
       author_name: author_name.trim(),
       author_email: author_email.trim().toLowerCase(),
       excerpt: excerptText,
-      featured_image: featured_image || defaultImage,
-      images: images || [],
+      images: mediaItems || [],          // store the array of objects
       tags: tags || [],
-      status: 'published',
+      status: 'published',               // immediate publication
       published_at: new Date().toISOString(),
       created_at: new Date().toISOString()
     }]).select();
+
     if (error) throw error;
+
     res.json({ success: true, post: data[0] });
   } catch (error) {
-    console.error(error);
+    console.error('Blog post creation error:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
 app.put('/api/blog/posts/:id', async (req, res) => {
   const { id } = req.params;
-  const updates = req.body;
+  const { title, content, excerpt, mediaItems, tags, status } = req.body;
+
+  const updates = {};
+  if (title !== undefined) updates.title = title.trim();
+  if (content !== undefined) updates.content = content;
+  if (excerpt !== undefined) updates.excerpt = excerpt;
+  if (mediaItems !== undefined) updates.images = mediaItems;
+  if (tags !== undefined) updates.tags = tags;
+  if (status !== undefined) updates.status = status;
+
   updates.updated_at = new Date().toISOString();
-  if (updates.status === 'published' && !updates.published_at) updates.published_at = new Date().toISOString();
+  if (status === 'published' && !updates.published_at) {
+    updates.published_at = new Date().toISOString();
+  }
+
   try {
-    await supabaseAdmin.from('blog_posts').update(updates).eq('id', id);
+    const { error } = await supabaseAdmin
+      .from('blog_posts')
+      .update(updates)
+      .eq('id', id);
+
+    if (error) throw error;
     res.json({ success: true });
-  } catch (error) { res.status(500).json({ success: false, error: error.message }); }
+  } catch (error) {
+    console.error('Blog post update error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
 app.delete('/api/blog/posts/:id', async (req, res) => {
@@ -919,7 +1004,9 @@ app.delete('/api/blog/posts/:id', async (req, res) => {
   try {
     await supabaseAdmin.from('blog_posts').delete().eq('id', id);
     res.json({ success: true });
-  } catch (error) { res.status(500).json({ success: false, error: error.message }); }
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
 // ==================== EVENTS ====================
