@@ -1168,35 +1168,49 @@ app.get('/api/blog/posts/:id/reactions/users', async (req, res) => {
   }
 
   try {
-    // Get reactions with user info from app_users
-    const { data, error } = await supabaseAdmin
+    // Get reactions with user_id (Firebase UID)
+    const { data: reactions, error } = await supabaseAdmin
       .from('blog_reactions')
-      .select(`
-        user_id,
-        reaction,
-        app_users (name, avatar_url)
-      `)
+      .select('user_id, reaction')
       .eq('post_id', parseInt(id));
-
     if (error) throw error;
 
-    // Group by reaction type
+    if (!reactions.length) {
+      return res.json({ success: true, reactionUsers: { like: [], love: [], insightful: [], support: [] } });
+    }
+
+    // Get all unique user_ids (Firebase UIDs)
+    const userIds = [...new Set(reactions.map(r => r.user_id))];
+    // Fetch user details from app_users using firebase_uid
+    const { data: users, error: userError } = await supabaseAdmin
+      .from('app_users')
+      .select('firebase_uid, name, avatar_url')
+      .in('firebase_uid', userIds);
+    if (userError) throw userError;
+
+    // Map firebase_uid -> user info
+    const userMap = {};
+    users.forEach(u => {
+      userMap[u.firebase_uid] = {
+        name: u.name || 'Anonymous',
+        avatar: u.avatar_url || null
+      };
+    });
+
+    // Build reaction users object
     const reactionUsers = {
       like: [],
       love: [],
       insightful: [],
       support: []
     };
-
-    data.forEach(row => {
-      const userName = row.app_users?.name || 'Anonymous';
-      const userAvatar = row.app_users?.avatar_url || null;
-      const isCurrentUser = row.user_id === currentUserId;
-      reactionUsers[row.reaction].push({
-        userId: row.user_id,
-        name: userName,
-        avatar: userAvatar,
-        isCurrentUser
+    reactions.forEach(r => {
+      const userInfo = userMap[r.user_id] || { name: 'Anonymous', avatar: null };
+      reactionUsers[r.reaction].push({
+        userId: r.user_id,
+        name: userInfo.name,
+        avatar: userInfo.avatar,
+        isCurrentUser: r.user_id === currentUserId
       });
     });
 
