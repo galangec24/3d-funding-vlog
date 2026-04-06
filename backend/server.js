@@ -1240,6 +1240,110 @@ app.get('/api/events', async (req, res) => {
   } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
 
+app.post('/api/events/:id/react', verifyFirebaseToken, async (req, res) => {
+  const { id } = req.params;
+  const { reaction } = req.body;
+  const userId = req.user.uid;
+  if (!reaction) return res.status(400).json({ success: false, error: 'Reaction type required' });
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('event_reactions')
+      .upsert({
+        event_id: parseInt(id),
+        user_id: userId,
+        reaction: reaction,
+        created_at: new Date().toISOString()
+      }, { onConflict: 'event_id, user_id' })
+      .select();
+    if (error) throw error;
+    res.json({ success: true, reaction: data[0] });
+  } catch (error) {
+    console.error('Error adding event reaction:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.delete('/api/events/:id/react', verifyFirebaseToken, async (req, res) => {
+  const { id } = req.params;
+  const userId = req.user.uid;
+  try {
+    await supabaseAdmin.from('event_reactions').delete().eq('event_id', parseInt(id)).eq('user_id', userId);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error removing event reaction:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/events/:id/reactions/users', async (req, res) => {
+  const { id } = req.params;
+  const authHeader = req.headers.authorization;
+  const token = authHeader?.split('Bearer ')[1];
+  let currentUserId = null;
+  if (token && adminAuth) {
+    try { const decoded = await adminAuth.verifyIdToken(token); currentUserId = decoded.uid; } catch (err) {}
+  }
+  try {
+    const { data: reactions, error } = await supabaseAdmin
+      .from('event_reactions')
+      .select('user_id, reaction')
+      .eq('event_id', parseInt(id));
+    if (error) throw error;
+    if (!reactions.length) {
+      return res.json({ success: true, reactionUsers: { like: [], love: [], insightful: [], support: [] } });
+    }
+    const userIds = [...new Set(reactions.map(r => r.user_id))];
+    const { data: users } = await supabaseAdmin
+      .from('app_users')
+      .select('firebase_uid, name, avatar_url')
+      .in('firebase_uid', userIds);
+    const userMap = {};
+    users.forEach(u => {
+      userMap[u.firebase_uid] = { name: u.name || 'Anonymous', avatar: u.avatar_url || null };
+    });
+    const reactionUsers = { like: [], love: [], insightful: [], support: [] };
+    reactions.forEach(r => {
+      const userInfo = userMap[r.user_id] || { name: 'Anonymous', avatar: null };
+      reactionUsers[r.reaction].push({
+        userId: r.user_id,
+        name: userInfo.name,
+        avatar: userInfo.avatar,
+        isCurrentUser: r.user_id === currentUserId
+      });
+    });
+    res.json({ success: true, reactionUsers });
+  } catch (error) {
+    console.error('Error fetching event reaction users:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/events/:id/reactions', async (req, res) => {
+  const { id } = req.params;
+  const authHeader = req.headers.authorization;
+  const token = authHeader?.split('Bearer ')[1];
+  let userId = null;
+  if (token && adminAuth) {
+    try { const decoded = await adminAuth.verifyIdToken(token); userId = decoded.uid; } catch (err) {}
+  }
+  try {
+    const { data: counts } = await supabaseAdmin.from('event_reactions').select('reaction').eq('event_id', parseInt(id));
+    const reactionCounts = { like: 0, love: 0, insightful: 0, support: 0 };
+    counts.forEach(r => { if (reactionCounts[r.reaction] !== undefined) reactionCounts[r.reaction]++; });
+    let userReaction = null;
+    if (userId) {
+      const { data: userReact } = await supabaseAdmin.from('event_reactions').select('reaction').eq('event_id', parseInt(id)).eq('user_id', userId).maybeSingle();
+      if (userReact) userReaction = userReact.reaction;
+    }
+    res.json({ success: true, counts: reactionCounts, userReaction });
+  } catch (error) {
+    console.error('Error fetching event reactions:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+
+
 app.get('/api/events/admin', async (req, res) => {
   try {
     const { data: events, error } = await supabaseAdmin.from('events').select('*').order('event_date', { ascending: false });
