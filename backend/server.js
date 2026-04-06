@@ -999,6 +999,162 @@ app.put('/api/blog/posts/:id', async (req, res) => {
   }
 });
 
+app.post('/api/blog/posts/:id/react', verifyFirebaseToken, async (req, res) => {
+  const { id } = req.params;
+  const { reaction } = req.body; // 'like', 'love', 'insightful', 'support'
+  const userId = req.user.uid;
+
+  if (!reaction) {
+    return res.status(400).json({ success: false, error: 'Reaction type required' });
+  }
+
+  try {
+    // Upsert: insert or update on conflict
+    const { data, error } = await supabaseAdmin
+      .from('blog_reactions')
+      .upsert({
+        post_id: parseInt(id),
+        user_id: userId,
+        reaction: reaction,
+        created_at: new Date().toISOString()
+      }, { onConflict: 'post_id, user_id' })
+      .select();
+
+    if (error) throw error;
+    res.json({ success: true, reaction: data[0] });
+  } catch (error) {
+    console.error('Error adding reaction:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.delete('/api/blog/posts/:id/react', verifyFirebaseToken, async (req, res) => {
+  const { id } = req.params;
+  const userId = req.user.uid;
+
+  try {
+    const { error } = await supabaseAdmin
+      .from('blog_reactions')
+      .delete()
+      .eq('post_id', parseInt(id))
+      .eq('user_id', userId);
+
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error removing reaction:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/blog/posts/:id/reactions', async (req, res) => {
+  const { id } = req.params;
+  const authHeader = req.headers.authorization;
+  const token = authHeader?.split('Bearer ')[1];
+  let userId = null;
+  if (token && adminAuth) {
+    try {
+      const decoded = await adminAuth.verifyIdToken(token);
+      userId = decoded.uid;
+    } catch (err) { /* ignore */ }
+  }
+
+  try {
+    // Get counts per reaction type
+    const { data: counts, error: countError } = await supabaseAdmin
+      .from('blog_reactions')
+      .select('reaction', { count: 'exact' })
+      .eq('post_id', parseInt(id));
+
+    if (countError) throw countError;
+
+    const reactionCounts = {
+      like: 0,
+      love: 0,
+      insightful: 0,
+      support: 0
+    };
+    counts.forEach(r => {
+      if (reactionCounts[r.reaction] !== undefined) reactionCounts[r.reaction]++;
+    });
+
+    // Get user's reaction (if logged in)
+    let userReaction = null;
+    if (userId) {
+      const { data: userReact, error: userError } = await supabaseAdmin
+        .from('blog_reactions')
+        .select('reaction')
+        .eq('post_id', parseInt(id))
+        .eq('user_id', userId)
+        .maybeSingle();
+      if (!userError && userReact) userReaction = userReact.reaction;
+    }
+
+    res.json({ success: true, counts: reactionCounts, userReaction });
+  } catch (error) {
+    console.error('Error fetching reactions:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/blog/posts/reactions/batch', async (req, res) => {
+  const { postIds } = req.body;
+  const authHeader = req.headers.authorization;
+  const token = authHeader?.split('Bearer ')[1];
+  let userId = null;
+  if (token && adminAuth) {
+    try {
+      const decoded = await adminAuth.verifyIdToken(token);
+      userId = decoded.uid;
+    } catch (err) { /* ignore */ }
+  }
+
+  if (!postIds || !Array.isArray(postIds)) {
+    return res.status(400).json({ success: false, error: 'postIds array required' });
+  }
+
+  try {
+    // Get all reactions for these posts
+    const { data, error } = await supabaseAdmin
+      .from('blog_reactions')
+      .select('post_id, reaction')
+      .in('post_id', postIds);
+
+    if (error) throw error;
+
+    // Build counts per post
+    const countsMap = {};
+    postIds.forEach(id => {
+      countsMap[id] = { like: 0, love: 0, insightful: 0, support: 0 };
+    });
+    data.forEach(r => {
+      if (countsMap[r.post_id] && countsMap[r.post_id][r.reaction] !== undefined) {
+        countsMap[r.post_id][r.reaction]++;
+      }
+    });
+
+    // Get user's reactions (if logged in)
+    let userReactions = {};
+    if (userId) {
+      const { data: userData, error: userError } = await supabaseAdmin
+        .from('blog_reactions')
+        .select('post_id, reaction')
+        .in('post_id', postIds)
+        .eq('user_id', userId);
+      if (!userError && userData) {
+        userData.forEach(r => {
+          userReactions[r.post_id] = r.reaction;
+        });
+      }
+    }
+
+    res.json({ success: true, counts: countsMap, userReactions });
+  } catch (error) {
+    console.error('Error batch fetching reactions:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 app.delete('/api/blog/posts/:id', async (req, res) => {
   const { id } = req.params;
   try {
