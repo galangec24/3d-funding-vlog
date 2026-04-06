@@ -1240,6 +1240,33 @@ app.get('/api/events', async (req, res) => {
   } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
 
+app.post('/api/events/reactions/batch', async (req, res) => {
+  const { eventIds } = req.body;
+  const authHeader = req.headers.authorization;
+  const token = authHeader?.split('Bearer ')[1];
+  let userId = null;
+  if (token && adminAuth) {
+    try { const decoded = await adminAuth.verifyIdToken(token); userId = decoded.uid; } catch (err) {}
+  }
+  if (!eventIds || !Array.isArray(eventIds)) return res.status(400).json({ success: false, error: 'eventIds array required' });
+  try {
+    // Get all reactions for these events
+    const { data } = await supabaseAdmin.from('event_reactions').select('event_id, reaction').in('event_id', eventIds);
+    const countsMap = {};
+    eventIds.forEach(id => { countsMap[id] = { like: 0, love: 0, insightful: 0, support: 0 }; });
+    data.forEach(r => { if (countsMap[r.event_id] && countsMap[r.event_id][r.reaction] !== undefined) countsMap[r.event_id][r.reaction]++; });
+    let userReactions = {};
+    if (userId) {
+      const { data: userData } = await supabaseAdmin.from('event_reactions').select('event_id, reaction').in('event_id', eventIds).eq('user_id', userId);
+      userData.forEach(r => { userReactions[r.event_id] = r.reaction; });
+    }
+    res.json({ success: true, counts: countsMap, userReactions });
+  } catch (error) {
+    console.error('Batch event reactions error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 app.post('/api/events/:id/react', verifyFirebaseToken, async (req, res) => {
   const { id } = req.params;
   const { reaction } = req.body;
@@ -1314,6 +1341,108 @@ app.get('/api/events/:id/reactions/users', async (req, res) => {
     res.json({ success: true, reactionUsers });
   } catch (error) {
     console.error('Error fetching event reaction users:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/events/:id/comments', async (req, res) => {
+  const { id } = req.params;
+  const authHeader = req.headers.authorization;
+  const token = authHeader?.split('Bearer ')[1];
+  let currentUserId = null;
+  if (token && adminAuth) {
+    try { const decoded = await adminAuth.verifyIdToken(token); currentUserId = decoded.uid; } catch (err) {}
+  }
+  try {
+    // Fetch comments
+    const { data: comments, error } = await supabaseAdmin
+      .from('event_comments')
+      .select('*')
+      .eq('event_id', parseInt(id))
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    if (!comments.length) return res.json({ success: true, comments: [] });
+    // Get comment IDs
+    const commentIds = comments.map(c => c.id);
+    // Fetch all reactions for these comments
+    const { data: reactions } = await supabaseAdmin.from('comment_reactions').select('comment_id, reaction').in('comment_id', commentIds);
+    const reactionCounts = {};
+    const userReactions = {};
+    commentIds.forEach(cid => { reactionCounts[cid] = { like: 0, love: 0, insightful: 0, support: 0 }; });
+    reactions.forEach(r => { if (reactionCounts[r.comment_id] && reactionCounts[r.comment_id][r.reaction] !== undefined) reactionCounts[r.comment_id][r.reaction]++; });
+    if (currentUserId) {
+      const { data: userReacts } = await supabaseAdmin.from('comment_reactions').select('comment_id, reaction').in('comment_id', commentIds).eq('user_id', currentUserId);
+      userReacts.forEach(r => { userReactions[r.comment_id] = r.reaction; });
+    }
+    // Also fetch reaction users per comment? Optional – can be fetched on hover later.
+    res.json({ success: true, comments, reactionCounts, userReactions });
+  } catch (error) {
+    console.error('Error fetching comments:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/events/:id/comments', verifyFirebaseToken, async (req, res) => {
+  const { id } = req.params;
+  const { content } = req.body;
+  const userId = req.user.uid;
+  const userEmail = req.user.email;
+  // Get user name and avatar from app_users
+  const { data: userData, error: userError } = await supabaseAdmin
+    .from('app_users')
+    .select('name, avatar_url')
+    .eq('firebase_uid', userId)
+    .single();
+  if (userError && userError.code !== 'PGRST116') console.error(userError);
+  const userName = userData?.name || userEmail?.split('@')[0] || 'Anonymous';
+  const userAvatar = userData?.avatar_url || null;
+  if (!content || content.trim().length === 0) return res.status(400).json({ success: false, error: 'Comment cannot be empty' });
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('event_comments')
+      .insert([{
+        event_id: parseInt(id),
+        user_id: userId,
+        user_name: userName,
+        user_avatar: userAvatar,
+        content: content.trim(),
+        created_at: new Date().toISOString()
+      }])
+      .select();
+    if (error) throw error;
+    res.json({ success: true, comment: data[0] });
+  } catch (error) {
+    console.error('Error adding comment:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/comments/:id/react', verifyFirebaseToken, async (req, res) => {
+  const { id } = req.params;
+  const { reaction } = req.body;
+  const userId = req.user.uid;
+  if (!reaction) return res.status(400).json({ success: false, error: 'Reaction type required' });
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('comment_reactions')
+      .upsert({ comment_id: parseInt(id), user_id: userId, reaction, created_at: new Date().toISOString() }, { onConflict: 'comment_id, user_id' })
+      .select();
+    if (error) throw error;
+    res.json({ success: true, reaction: data[0] });
+  } catch (error) {
+    console.error('Error adding comment reaction:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.delete('/api/comments/:id/react', verifyFirebaseToken, async (req, res) => {
+  const { id } = req.params;
+  const userId = req.user.uid;
+  try {
+    await supabaseAdmin.from('comment_reactions').delete().eq('comment_id', parseInt(id)).eq('user_id', userId);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error removing comment reaction:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
