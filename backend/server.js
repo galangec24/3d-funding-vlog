@@ -69,6 +69,23 @@ const uploadAvatar = multer({
   },
 });
 
+const blogImageStorage = new CloudinaryStorage({
+  cloudinary: cloudinary,
+  params: {
+    folder: 'blog_images',
+    allowed_formats: ['jpg', 'jpeg', 'png', 'gif', 'webp'],
+    transformation: [{ width: 1200, crop: 'limit' }],  // optional: resize for blog images
+  },
+});
+const uploadBlogImage = multer({
+  storage: blogImageStorage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit for blog images
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith('image/')) cb(null, true);
+    else cb(new Error('Only images are allowed'), false);
+  },
+});
+
 // ==================== BREVO EMAIL API (DIRECT FETCH, NO SDK) ====================
 const BREVO_API_KEY = process.env.BREVO_API_KEY;
 const BREVO_SENDER_EMAIL = process.env.BREVO_SENDER_EMAIL || 'noreply@yourdomain.com';
@@ -832,6 +849,19 @@ app.get('/api/blog/admin/posts', async (req, res) => {
   } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
 
+app.post('/api/blog/upload-image', verifyFirebaseToken, uploadBlogImage.single('image'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ success: false, error: 'No image uploaded' });
+    }
+    const imageUrl = req.file.path; // Cloudinary secure URL
+    res.json({ success: true, imageUrl });
+  } catch (error) {
+    console.error('Blog image upload error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 app.get('/api/blog/posts/:id', async (req, res) => {
   const { id } = req.params;
   try {
@@ -843,22 +873,34 @@ app.get('/api/blog/posts/:id', async (req, res) => {
 });
 
 app.post('/api/blog/posts', strictLimiter, async (req, res) => {
-  const { title, content, author_name, author_email, excerpt, featured_image, tags, turnstile_token } = req.body;
+  const { title, content, author_name, author_email, excerpt, featured_image, images, tags, turnstile_token } = req.body;
   if (!turnstile_token) return res.status(400).json({ success: false, error: 'Verification required' });
   const isHuman = await verifyTurnstile(turnstile_token);
   if (!isHuman) return res.status(400).json({ success: false, error: 'Verification failed' });
   if (!title || !content || !author_name || !author_email) return res.status(400).json({ success: false, error: 'Required fields missing' });
+
   const excerptText = excerpt || content.substring(0, 150);
   const defaultImage = `https://picsum.photos/800/400?random=${Date.now()}`;
   try {
     const { data, error } = await supabaseAdmin.from('blog_posts').insert([{
-      title: title.trim(), content, author_name: author_name.trim(), author_email: author_email.trim().toLowerCase(),
-      excerpt: excerptText, featured_image: featured_image || defaultImage, tags: tags || [], status: 'pending',
+      title: title.trim(),
+      content,
+      author_name: author_name.trim(),
+      author_email: author_email.trim().toLowerCase(),
+      excerpt: excerptText,
+      featured_image: featured_image || defaultImage,
+      images: images || [],
+      tags: tags || [],
+      status: 'published',
+      published_at: new Date().toISOString(),
       created_at: new Date().toISOString()
     }]).select();
     if (error) throw error;
     res.json({ success: true, post: data[0] });
-  } catch (error) { res.status(500).json({ success: false, error: error.message }); }
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
 app.put('/api/blog/posts/:id', async (req, res) => {
