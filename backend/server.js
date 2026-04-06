@@ -1483,16 +1483,28 @@ app.post('/api/blog/posts/:id/comments', verifyFirebaseToken, async (req, res) =
   const { content, parent_comment_id } = req.body;
   const userId = req.user.uid;
   const userEmail = req.user.email;
-  const { data: userData, error: userError } = await supabaseAdmin
-    .from('app_users')
-    .select('name, avatar_url')
-    .eq('firebase_uid', userId)
-    .single();
-  if (userError && userError.code !== 'PGRST116') console.error(userError);
-  const userName = userData?.name || userEmail?.split('@')[0] || 'Anonymous';
-  const userAvatar = userData?.avatar_url || null;
-  if (!content || content.trim().length === 0) return res.status(400).json({ success: false, error: 'Comment cannot be empty' });
+  
+  console.log('📝 Blog comment request:', { postId: id, content, parent_comment_id, userId, userEmail });
+  
   try {
+    // Get user info from app_users
+    const { data: userData, error: userError } = await supabaseAdmin
+      .from('app_users')
+      .select('name, avatar_url')
+      .eq('firebase_uid', userId)
+      .single();
+      
+    if (userError && userError.code !== 'PGRST116') {
+      console.error('User fetch error:', userError);
+    }
+    
+    const userName = userData?.name || userEmail?.split('@')[0] || 'Anonymous';
+    const userAvatar = userData?.avatar_url || null;
+    
+    if (!content || content.trim().length === 0) {
+      return res.status(400).json({ success: false, error: 'Comment cannot be empty' });
+    }
+    
     const insertData = {
       post_id: parseInt(id),
       user_id: userId,
@@ -1502,11 +1514,22 @@ app.post('/api/blog/posts/:id/comments', verifyFirebaseToken, async (req, res) =
       created_at: new Date().toISOString()
     };
     if (parent_comment_id) insertData.parent_comment_id = parseInt(parent_comment_id);
-    const { data, error } = await supabaseAdmin.from('blog_comments').insert([insertData]).select();
-    if (error) throw error;
+    
+    console.log('Inserting comment:', insertData);
+    
+    const { data, error } = await supabaseAdmin
+      .from('blog_comments')
+      .insert([insertData])
+      .select();
+      
+    if (error) {
+      console.error('Supabase insert error:', error);
+      return res.status(500).json({ success: false, error: error.message });
+    }
+    
     res.json({ success: true, comment: data[0] });
   } catch (error) {
-    console.error('Error adding blog comment:', error);
+    console.error('Unexpected error:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
