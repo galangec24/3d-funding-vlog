@@ -1155,6 +1155,58 @@ app.post('/api/blog/posts/reactions/batch', async (req, res) => {
   }
 });
 
+app.get('/api/blog/posts/:id/reactions/users', async (req, res) => {
+  const { id } = req.params;
+  const authHeader = req.headers.authorization;
+  const token = authHeader?.split('Bearer ')[1];
+  let currentUserId = null;
+  if (token && adminAuth) {
+    try {
+      const decoded = await adminAuth.verifyIdToken(token);
+      currentUserId = decoded.uid;
+    } catch (err) { /* ignore */ }
+  }
+
+  try {
+    // Get reactions with user info from app_users
+    const { data, error } = await supabaseAdmin
+      .from('blog_reactions')
+      .select(`
+        user_id,
+        reaction,
+        app_users (name, avatar_url)
+      `)
+      .eq('post_id', parseInt(id));
+
+    if (error) throw error;
+
+    // Group by reaction type
+    const reactionUsers = {
+      like: [],
+      love: [],
+      insightful: [],
+      support: []
+    };
+
+    data.forEach(row => {
+      const userName = row.app_users?.name || 'Anonymous';
+      const userAvatar = row.app_users?.avatar_url || null;
+      const isCurrentUser = row.user_id === currentUserId;
+      reactionUsers[row.reaction].push({
+        userId: row.user_id,
+        name: userName,
+        avatar: userAvatar,
+        isCurrentUser
+      });
+    });
+
+    res.json({ success: true, reactionUsers });
+  } catch (error) {
+    console.error('Error fetching reaction users:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 app.delete('/api/blog/posts/:id', async (req, res) => {
   const { id } = req.params;
   try {
